@@ -14,6 +14,8 @@ import {
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
+import { renderTerminalStateExport } from "../terminal/index.js";
+
 export type SupportedShell = "bash" | "zsh";
 
 export interface ShellIntegrationResult {
@@ -49,7 +51,7 @@ const BACKUP_INFIX = ".szal-backup.";
 // Resolve an explicit shell or infer it from SHELL without accepting unsupported config files.
 export const resolveSupportedShell = (
   requestedShell: string | undefined,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
 ): SupportedShell => {
   const shellName = requestedShell ?? basename(environment.SHELL ?? "");
 
@@ -216,6 +218,8 @@ const renderManagedBlock = (
   includeTerminalIdentifier: boolean,
 ): Buffer => {
   const prefix = separator === "added" ? "\n" : "";
+  const enabledExport = renderTerminalStateExport("on");
+  const disabledExport = renderTerminalStateExport("off");
   const terminalIdentifier = includeTerminalIdentifier
     ? `
 if [ -z "\${SZAL_TERMINAL_ID+x}" ]; then
@@ -231,12 +235,12 @@ szal() {
   if [ "$#" -eq 1 ]; then
     case "\${1-}" in
       -on|--on|on)
-        export SZAL_ENABLED=1
+        ${enabledExport}
         printf '%s\\n' 'Szal is enabled in this terminal.'
         return 0
         ;;
       -off|--off|off)
-        export SZAL_ENABLED=0
+        ${disabledExport}
         printf '%s\\n' 'Szal is disabled in this terminal.'
         return 0
         ;;

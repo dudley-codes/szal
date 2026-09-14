@@ -25,16 +25,16 @@ const captureCli = (arguments_) => {
 };
 
 // Execute the compiled binary to verify the same interface users invoke after installation.
-const runExecutable = (arguments_, cwd = process.cwd()) =>
+const runExecutable = (arguments_, cwd = process.cwd(), environment = process.env) =>
   spawnSync(process.execPath, [resolve("dist/cli.js"), ...arguments_], {
     cwd,
     encoding: "utf8",
+    env: environment,
   });
 
 test("help aliases resolve to one command", () => {
   for (const alias of ["help", "--help", "-h"]) {
     assert.deepEqual(parseArguments([alias]), {
-      arguments_: [],
       command: "help",
       kind: "command",
     });
@@ -44,7 +44,6 @@ test("help aliases resolve to one command", () => {
 test("version aliases resolve to one command", () => {
   for (const alias of ["version", "--version", "-v"]) {
     assert.deepEqual(parseArguments([alias]), {
-      arguments_: [],
       command: "version",
       kind: "command",
     });
@@ -129,5 +128,75 @@ test("the executable does not modify the current project", () => {
     assert.equal(readFileSync(markerPath, "utf8"), beforeContents);
   } finally {
     rmSync(projectDirectory, { force: true, recursive: true });
+  }
+});
+
+test("config commands persist and retrieve global values with JSON output", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-config-"));
+  const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-project-"));
+  const markerPath = join(projectDirectory, "source.txt");
+  const environment = { ...process.env, XDG_CONFIG_HOME: join(homeDirectory, "config") };
+  writeFileSync(markerPath, "canonical source\n");
+  const beforeFiles = readdirSync(projectDirectory);
+
+  try {
+    const setResult = runExecutable(
+      ["config", "set", "profile", "safe", "--json"],
+      projectDirectory,
+      environment,
+    );
+    const getResult = runExecutable(
+      ["config", "get", "profile", "--json"],
+      projectDirectory,
+      environment,
+    );
+    const showResult = runExecutable(["config", "--json"], projectDirectory, environment);
+
+    assert.equal(setResult.status, 0, setResult.stderr);
+    assert.deepEqual(JSON.parse(setResult.stdout), { path: "profile", value: "safe" });
+    assert.equal(getResult.status, 0, getResult.stderr);
+    assert.equal(JSON.parse(getResult.stdout), "safe");
+    assert.equal(showResult.status, 0, showResult.stderr);
+    assert.equal(JSON.parse(showResult.stdout).profile, "safe");
+    assert.deepEqual(readdirSync(projectDirectory), beforeFiles);
+    assert.equal(readFileSync(markerPath, "utf8"), "canonical source\n");
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+    rmSync(projectDirectory, { force: true, recursive: true });
+  }
+});
+
+test("invalid config updates fail without changing the previous file", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-config-invalid-"));
+  const configHome = join(homeDirectory, "config");
+  const environment = { ...process.env, XDG_CONFIG_HOME: configHome };
+
+  try {
+    const initialResult = runExecutable(
+      ["config", "set", "profile", "safe"],
+      process.cwd(),
+      environment,
+    );
+    const configPath = join(configHome, "szal", "config.json");
+    const beforeBytes = readFileSync(configPath, "utf8");
+    const invalidResult = runExecutable(
+      ["config", "set", "profile", "maximum"],
+      process.cwd(),
+      environment,
+    );
+    const negativeResult = runExecutable(
+      ["config", "set", "retention.telemetryDays", "-1"],
+      process.cwd(),
+      environment,
+    );
+
+    assert.equal(initialResult.status, 0, initialResult.stderr);
+    assert.equal(invalidResult.status, 1);
+    assert.match(invalidResult.stderr, /profile.*safe.*balanced.*aggressive.*off/i);
+    assert.equal(negativeResult.status, 1);
+    assert.match(negativeResult.stderr, /retention\.telemetryDays.*non-negative integer/i);
+    assert.equal(readFileSync(configPath, "utf8"), beforeBytes);
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
   }
 });

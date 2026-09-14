@@ -2,7 +2,7 @@
 
 Szal is an agent-agnostic context virtualization layer for terminal-based coding agents.
 
-This repository currently contains the TypeScript CLI foundation. Context compression, agent adapters, telemetry, and configuration are tracked in later milestones.
+This repository currently contains the TypeScript CLI, persistent storage, and global configuration foundations. Context compression, agent adapters, and telemetry are tracked in later milestones.
 
 ## Requirements
 
@@ -60,10 +60,19 @@ After linking, the currently implemented commands are:
 ```bash
 szal help
 szal --version
+szal on
+szal off
+szal status
 szal shell install [bash|zsh] [--terminal-id]
 szal shell uninstall [bash|zsh]
 szal shell restore [bash|zsh]
+szal config
+szal config --json
+szal config get profile
+szal config set profile safe
 ```
+
+## Shell integration
 
 Shell installation appends a clearly marked function to `~/.bashrc` or `~/.zshrc`. The
 function changes `SZAL_ENABLED` in the current terminal for `szal on`/`szal -on` and
@@ -73,6 +82,24 @@ Szal creates a private timestamped backup before every configuration change, val
 the result with the selected shell, and leaves the original untouched if validation fails.
 Uninstall removes only the marked block. Restore replaces the configuration with its most
 recent Szal backup.
+
+## Global configuration
+
+Szal reads configuration from `$XDG_CONFIG_HOME/szal/config.json`. If `XDG_CONFIG_HOME` is unset or relative, it uses `~/.config/szal/config.json`. Reading defaults does not create the file. The first update creates a private configuration directory and file.
+
+The defaults use the `balanced` profile, automatic `llmtrim` and `squeez` availability, enabled statistics, memory, and cold storage, 90-day telemetry retention, 30-day cold storage retention, and a 1 GiB cold storage limit. Supported profiles are `safe`, `balanced`, `aggressive`, and `off`.
+
+Values are addressed with dotted paths. Model names after `modelWindows.` are treated as literal identifiers, including names containing dots:
+
+```bash
+szal config set engines.llmtrim.mode disabled
+szal config set retention.telemetryDays 30
+szal config set stats.enabled false
+szal config set modelWindows.gpt-5.2 400000
+szal config get modelWindows.gpt-5.2 --json
+```
+
+Values that parse as JSON retain their JSON type; other values are stored as strings. Every update validates the complete configuration before writing, preserves safe unknown fields, atomically replaces `config.json`, and saves the previous bytes as `config.json.bak`. Invalid files and updates produce a field-specific error without overwriting the current file.
 
 ## Design constraints
 

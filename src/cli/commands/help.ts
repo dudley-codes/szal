@@ -9,9 +9,15 @@ Usage:
   szal [command]
 
 Commands:
-  help       Show command help
-  shell      Install, uninstall, or restore bash/zsh integration
-  version    Show the installed version
+  config                      Show the global configuration
+  config get <path>           Read one configuration value
+  config set <path> <value>   Update one configuration value
+  on                          Enable compression in this terminal
+  off                         Use pass-through compression in this terminal
+  shell                       Manage bash/zsh shell integration
+  status                      Show terminal, project, agent, engine, and telemetry state
+  help                        Show command help
+  version                     Show the installed version
 
 Shell integration:
   szal shell install [bash|zsh] [--terminal-id]
@@ -19,7 +25,10 @@ Shell integration:
   szal shell restore [bash|zsh]
 
 Options:
-  -h, --help       Show command help
-  -v, --version    Show the installed version`);
+  -on, --on         Alias for on
+  -off, --off       Alias for off
+  -h, --help        Show command help
+  -v, --version     Show the installed version
+  --json           Emit JSON for config commands`);
   return 0;
 };
