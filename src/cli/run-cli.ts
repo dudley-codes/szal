@@ -1,3 +1,4 @@
+import { runConfig } from "./commands/config.js";
 import { runHelp } from "./commands/help.js";
 import { runOff, runOn } from "./commands/terminal-state.js";
 import { runStatus } from "./commands/status.js";
@@ -19,6 +20,7 @@ export interface CliOptions {
 }
 
 const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
+  config: runConfig,
   help: runHelp,
   off: runOff,
   on: runOn,
