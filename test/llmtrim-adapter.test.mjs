@@ -115,6 +115,54 @@ test("a missing llmtrim binary leaves pass-through measurement available", async
   );
 });
 
+test("recovery remains unavailable before llmtrim 0.12.0", async () => {
+  let pid = 42;
+  const oldStatus = () => ({
+    ...HEALTHY_STATUS,
+    daemon: {
+      ...HEALTHY_STATUS.daemon,
+      binary_version: "0.11.12",
+      pid,
+      version: "0.11.12",
+    },
+  });
+  const adapter = createLlmtrimAdapter({
+    runCommand: async (invocation) => {
+      if (invocation.arguments[0] === "--version") {
+        return commandResult("llmtrim 0.11.12\n");
+      }
+      if (invocation.arguments[0] === "start") {
+        pid += 1;
+        return commandResult("Interceptor running\n");
+      }
+      return commandResult(JSON.stringify(oldStatus()));
+    },
+  });
+  const routedContext = context({
+    HTTPS_PROXY: "http://127.0.0.1:43117",
+    HTTP_PROXY: "http://127.0.0.1:43117",
+    NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+    http_proxy: "http://127.0.0.1:43117",
+    https_proxy: "http://127.0.0.1:43117",
+  });
+
+  const configured = await adapter.configure(routedContext, {
+    enableRecovery: true,
+    host: "claude",
+    mode: "on",
+    preset: "auto",
+  });
+  const recovery = (await adapter.capabilities(context(configured.details.environment))).find(
+    ({ name }) => name === "request-recovery",
+  );
+
+  assert.equal(configured.status, "succeeded");
+  assert.equal(configured.details.compression, "enabled");
+  assert.equal(configured.details.recovery, "unverified");
+  assert.equal(recovery.status, "unavailable");
+  assert.equal(recovery.issue.code, "llmtrim-recovery-unsupported");
+});
+
 test("installation is idempotent and verifies the installed binary", async () => {
   let installed = false;
   const calls = [];
@@ -198,8 +246,9 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
   const initialContext = context({
     HTTPS_PROXY: "http://ignored-proxy.test:8080",
     LLMTRIM_HOME: "/var/lib/llmtrim",
-    NO_PROXY: "internal.test",
+    NO_PROXY: "upper.internal",
     https_proxy: "http://127.0.0.1:7890",
+    no_proxy: "lower.internal",
   });
 
   const first = await adapter.configure(initialContext, {
@@ -219,8 +268,10 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
   assert.equal(first.details.environment.http_proxy, "http://127.0.0.1:43117");
   assert.equal(first.details.environment.SZAL_LLMTRIM_PROXY_URL, "http://127.0.0.1:43117");
   assert.equal(first.details.environment.NODE_EXTRA_CA_CERTS, "/var/lib/llmtrim/ca.pem");
-  assert.match(first.details.environment.NO_PROXY, /internal\.test/);
+  assert.match(first.details.environment.NO_PROXY, /lower\.internal/);
+  assert.match(first.details.environment.NO_PROXY, /upper\.internal/);
   assert.match(first.details.environment.NO_PROXY, /localhost/);
+  assert.equal(first.details.environment.no_proxy, first.details.environment.NO_PROXY);
 
   const startCall = calls.find(({ arguments: arguments_ }) => arguments_[0] === "start");
   assert.deepEqual(startCall.arguments, ["start"]);
@@ -288,6 +339,18 @@ test("running daemon settings are restarted only when configuration changes", as
     mode: "on",
     preset: "safe",
   });
+  const fourth = await recreatedAdapter.configure(
+    context({
+      ...third.details.environment,
+      LLMTRIM_UPSTREAM_PROXY: "http://replacement-proxy.test:8080",
+    }),
+    {
+      enableRecovery: false,
+      host: "claude",
+      mode: "on",
+      preset: "safe",
+    },
+  );
 
   const startCalls = calls.filter(({ arguments: arguments_ }) => arguments_[0] === "start");
   assert.equal(first.status, "succeeded");
@@ -296,11 +359,18 @@ test("running daemon settings are restarted only when configuration changes", as
   assert.equal(second.details.recovery, "disabled");
   assert.equal(third.status, "succeeded");
   assert.equal(third.changed, false);
-  assert.equal(startCalls.length, 2);
+  assert.equal(fourth.status, "succeeded");
+  assert.equal(fourth.changed, true);
+  assert.equal(startCalls.length, 3);
   assert.deepEqual(startCalls[0].arguments, ["start", "--force"]);
   assert.deepEqual(startCalls[1].arguments, ["start", "--force"]);
+  assert.deepEqual(startCalls[2].arguments, ["start", "--force"]);
   assert.equal(startCalls[1].environment.LLMTRIM_PRESET, "safe");
   assert.equal(startCalls[1].environment.LLMTRIM_FIRST_ARRIVAL_RECALL, "false");
+  assert.equal(
+    startCalls[2].environment.LLMTRIM_UPSTREAM_PROXY,
+    "http://replacement-proxy.test:8080",
+  );
 });
 
 test("OFF mode restores the upstream proxy and records byte-identical pass-through", async () => {
@@ -376,6 +446,33 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
     mode: "off",
     preset: "auto",
   });
+  let aliasProbeCalls = 0;
+  const aliasEnvironment = {
+    NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+    https_proxy: "http://localhost:43117",
+  };
+  const trailingSlashEnvironment = {
+    NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+    https_proxy: "http://127.0.0.1:43117/",
+  };
+  const aliasAdapter = createLlmtrimAdapter({
+    runCommand: async () => {
+      aliasProbeCalls += 1;
+      return commandResult(JSON.stringify(HEALTHY_STATUS));
+    },
+  });
+  const aliasProxy = await aliasAdapter.configure(context(aliasEnvironment), {
+    enableRecovery: false,
+    host: "claude",
+    mode: "off",
+    preset: "auto",
+  });
+  const trailingSlashProxy = await aliasAdapter.configure(context(trailingSlashEnvironment), {
+    enableRecovery: false,
+    host: "claude",
+    mode: "off",
+    preset: "auto",
+  });
   const measurement = createLlmtrimPassThroughMeasurement({
     model: "claude-sonnet",
     provider: "anthropic",
@@ -396,6 +493,13 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
   assert.equal(unverifiedOff.issue.code, "llmtrim-off-proxy-unverified");
   assert.equal(localProxy.changed, false);
   assert.equal(localProxy.details.environment.https_proxy, "http://127.0.0.1:7890");
+  assert.equal(aliasProxy.status, "succeeded");
+  assert.equal(aliasProxy.changed, false);
+  assert.deepEqual(aliasProxy.details.environment, aliasEnvironment);
+  assert.equal(trailingSlashProxy.status, "succeeded");
+  assert.equal(trailingSlashProxy.changed, false);
+  assert.deepEqual(trailingSlashProxy.details.environment, trailingSlashEnvironment);
+  assert.equal(aliasProbeCalls, 0);
   assert.deepEqual(measurement, {
     approximate: false,
     compressed: false,
