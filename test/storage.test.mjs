@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
@@ -9,7 +10,10 @@ import BetterSqlite3 from "better-sqlite3";
 
 import {
   applyMigrations,
+  cleanupColdStorage,
+  MIGRATIONS,
   openSzalDatabase,
+  readColdObject,
   resolveStoragePaths,
   storeColdObject,
 } from "../dist/core/storage/index.js";
@@ -19,6 +23,9 @@ const EXPECTED_TABLES = [
   "benchmarks",
   "cold_object_references",
   "cold_objects",
+  "cold_storage_cleanup_items",
+  "cold_storage_cleanup_runs",
+  "cold_storage_migration_repairs",
   "compression_events",
   "decisions",
   "installations",
@@ -105,10 +112,194 @@ test("reopening a database is idempotent and preserves data", () => {
     );
     assert.equal(
       reopenedDatabase.connection.prepare("SELECT COUNT(*) FROM schema_migrations").pluck().get(),
-      1,
+      MIGRATIONS.length,
     );
   } finally {
     reopenedDatabase.connection.close();
+    rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
+
+test("cold-storage audit migration upgrades the initial schema without losing metadata", () => {
+  const database = new BetterSqlite3(":memory:");
+  const initialMigration = MIGRATIONS[0];
+  assert.notEqual(initialMigration, undefined);
+
+  try {
+    applyMigrations(database, [initialMigration]);
+    database
+      .prepare(
+        "INSERT INTO cold_objects (id, content_hash, relative_path, raw_bytes) VALUES (?, ?, ?, ?)",
+      )
+      .run("object-1", "hash-1", "sha256/ha/hash-1", 7);
+
+    applyMigrations(database);
+
+    assert.equal(database.prepare("SELECT COUNT(*) FROM cold_objects").pluck().get(), 1);
+    assert.equal(
+      database
+        .prepare(
+          "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cold_storage_cleanup_runs'",
+        )
+        .pluck()
+        .get(),
+      1,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) FROM schema_migrations").pluck().get(),
+      MIGRATIONS.length,
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("cold-storage migration repairs malformed legacy timestamps without losing content", () => {
+  const database = new BetterSqlite3(":memory:");
+  const homeDirectory = createTemporaryHome();
+  const paths = resolveStoragePaths({}, homeDirectory);
+  const initialMigration = MIGRATIONS[0];
+  assert.notEqual(initialMigration, undefined);
+  const payload = Buffer.from("recoverable legacy payload");
+  const contentHash = createHash("sha256").update(payload).digest("hex");
+  const id = `szal://cold/sha256/${contentHash}`;
+  const relativePath = join("sha256", contentHash.slice(0, 2), contentHash);
+  const filePath = join(paths.coldDirectory, relativePath);
+  const policy = { enabled: true, maxBytes: 1_000, retentionDays: 0 };
+
+  try {
+    applyMigrations(database, [initialMigration]);
+    mkdirSync(join(paths.coldDirectory, "sha256", contentHash.slice(0, 2)), {
+      mode: 0o700,
+      recursive: true,
+    });
+    writeFileSync(filePath, payload, { mode: 0o600 });
+    database
+      .prepare(
+        `INSERT INTO cold_objects (
+           id, content_hash, relative_path, raw_bytes, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, contentHash, relativePath, payload.byteLength, "broken-object-date");
+    database
+      .prepare(
+        `INSERT INTO cold_object_references (
+           id, cold_object_id, category, created_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("legacy-reference", id, "memory", "broken-reference-date", "broken-expiry");
+
+    applyMigrations(database);
+
+    const repairedObjectCreatedAt = database
+      .prepare("SELECT created_at FROM cold_objects WHERE id = ?")
+      .pluck()
+      .get(id);
+    const repairedReference = database
+      .prepare("SELECT created_at, expires_at FROM cold_object_references WHERE id = ?")
+      .get("legacy-reference");
+    assert.match(repairedObjectCreatedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.match(repairedReference.created_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.equal(repairedReference.expires_at, null);
+    assert.deepEqual(
+      database
+        .prepare(
+          `SELECT record_kind, field_name, original_value, reason
+             FROM cold_storage_migration_repairs
+            ORDER BY id`,
+        )
+        .all(),
+      [
+        {
+          field_name: "created_at",
+          original_value: "broken-object-date",
+          reason: "invalid_timestamp",
+          record_kind: "object",
+        },
+        {
+          field_name: "created_at",
+          original_value: "broken-reference-date",
+          reason: "invalid_timestamp",
+          record_kind: "reference",
+        },
+        {
+          field_name: "expires_at",
+          original_value: "broken-expiry",
+          reason: "invalid_timestamp",
+          record_kind: "reference",
+        },
+      ],
+    );
+    const read = readColdObject(database, paths, id);
+    assert.equal(read.status, "found");
+    assert.deepEqual(Buffer.from(read.content), payload);
+    assert.equal(cleanupColdStorage(database, paths, policy).status, "completed");
+    assert.doesNotThrow(() =>
+      storeColdObject(database, paths, "new payload", { category: "memory" }, { policy }),
+    );
+  } finally {
+    database.close();
+    rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
+
+test("cold-storage migration canonicalizes numeric legacy timestamps", () => {
+  const database = new BetterSqlite3(":memory:");
+  const homeDirectory = createTemporaryHome();
+  const paths = resolveStoragePaths({}, homeDirectory);
+  const initialMigration = MIGRATIONS[0];
+  assert.notEqual(initialMigration, undefined);
+  const payload = Buffer.from("recoverable numeric-timestamp payload");
+  const contentHash = createHash("sha256").update(payload).digest("hex");
+  const id = `szal://cold/sha256/${contentHash}`;
+  const relativePath = join("sha256", contentHash.slice(0, 2), contentHash);
+  const filePath = join(paths.coldDirectory, relativePath);
+  const policy = { enabled: true, maxBytes: 1_000, retentionDays: 0 };
+
+  try {
+    applyMigrations(database, [initialMigration]);
+    mkdirSync(join(paths.coldDirectory, "sha256", contentHash.slice(0, 2)), {
+      mode: 0o700,
+      recursive: true,
+    });
+    writeFileSync(filePath, payload, { mode: 0o600 });
+    database
+      .prepare(
+        `INSERT INTO cold_objects (
+           id, content_hash, relative_path, raw_bytes, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, contentHash, relativePath, payload.byteLength, "2451545");
+    database
+      .prepare(
+        `INSERT INTO cold_object_references (
+           id, cold_object_id, category, created_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("numeric-legacy-reference", id, "memory", "2451545", "2451546");
+
+    applyMigrations(database);
+
+    assert.equal(
+      database.prepare("SELECT created_at FROM cold_objects WHERE id = ?").pluck().get(id),
+      "2000-01-01T12:00:00.000Z",
+    );
+    assert.deepEqual(
+      database
+        .prepare("SELECT created_at, expires_at FROM cold_object_references WHERE id = ?")
+        .get("numeric-legacy-reference"),
+      {
+        created_at: "2000-01-01T12:00:00.000Z",
+        expires_at: "2000-01-02T12:00:00.000Z",
+      },
+    );
+    assert.deepEqual(readFileSync(filePath), payload);
+    assert.equal(cleanupColdStorage(database, paths, policy).status, "completed");
+    assert.doesNotThrow(() =>
+      storeColdObject(database, paths, "new payload", { category: "memory" }, { policy }),
+    );
+  } finally {
+    database.close();
     rmSync(homeDirectory, { force: true, recursive: true });
   }
 });
