@@ -68,3 +68,15 @@ szal --version
 - Agent-specific behavior belongs behind adapters.
 - Szal orchestrates existing compression engines instead of implementing a custom compressor.
 - No daemon is included in the CLI foundation.
+
+## Adapter contracts
+
+Agent and compression-engine integrations use separate contracts exported from `szal/adapters`.
+Both contracts expose detection, version, installation, configuration, health, capability, and
+disable operations. They receive filesystem and environment context, but no CLI output or storage
+objects.
+
+Capability results distinguish `available`, `degraded`, and `unavailable` states and identify each
+capability as `required` or `optional`. Limitations use stable issue codes so doctor and other core
+services can consume results without parsing presentation text. A missing optional engine must
+return unavailable results instead of preventing other adapters from being inspected.

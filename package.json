@@ -6,6 +6,12 @@
   "bin": {
     "szal": "./dist/cli.js"
   },
+  "exports": {
+    "./adapters": {
+      "types": "./dist/core/adapters/index.d.ts",
+      "import": "./dist/core/adapters/index.js"
+    }
+  },
   "files": [
     "dist"
   ],
