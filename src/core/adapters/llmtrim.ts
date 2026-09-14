@@ -484,9 +484,7 @@ const parseDaemonConfiguration = (
     enableRecovery: document.enableRecovery,
     pid: Number(document.pid),
     preset: document.preset as LlmtrimPreset,
-    ...(document.upstreamProxy === undefined
-      ? {}
-      : { upstreamProxy: document.upstreamProxy as string }),
+    ...(document.upstreamProxy === undefined ? {} : { upstreamProxy: document.upstreamProxy }),
     version: 1,
   };
 };
@@ -600,7 +598,7 @@ const captureEnvironmentState = (
         }
         const upstream = current.LLMTRIM_UPSTREAM_PROXY;
         if (upstream === undefined) {
-          delete values[key];
+          Reflect.deleteProperty(values, key);
         } else {
           values[key] = upstream;
         }
@@ -612,7 +610,7 @@ const captureEnvironmentState = (
       }
       const value = current[key];
       if (value === undefined) {
-        delete values[key];
+        Reflect.deleteProperty(values, key);
       } else {
         values[key] = value;
       }
@@ -628,7 +626,7 @@ const captureEnvironmentState = (
     ownedProxy = true;
     const upstream = context.environment.LLMTRIM_UPSTREAM_PROXY;
     if (upstream === undefined) {
-      delete values[key];
+      Reflect.deleteProperty(values, key);
     } else {
       values[key] = upstream;
     }
@@ -666,7 +664,7 @@ const enabledEnvironment = (
   environment.LLMTRIM_PRESET = request.preset;
   environment.LLMTRIM_FIRST_ARRIVAL_RECALL = String(request.enableRecovery);
   if (daemonPid === undefined) {
-    delete environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
+    delete environment.SZAL_LLMTRIM_DAEMON_CONFIGURATION;
   } else {
     environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION] = JSON.stringify({
       enableRecovery: request.enableRecovery,
@@ -684,7 +682,7 @@ const enabledEnvironment = (
   return environment;
 };
 
-// Remove only values identifiable as llmtrim-owned and restore a captured upstream proxy.
+// Restore captured managed variables, or remove only proxy values verified as llmtrim-owned.
 const passThroughEnvironment = (
   context: AdapterContext,
   knownProxyUrl?: string,
@@ -695,13 +693,13 @@ const passThroughEnvironment = (
     for (const key of MANAGED_ENVIRONMENT_KEYS) {
       const original = state.values[key];
       if (original === undefined) {
-        delete environment[key];
+        Reflect.deleteProperty(environment, key);
       } else {
         environment[key] = original;
       }
     }
-    delete environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
-    delete environment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
+    delete environment.SZAL_LLMTRIM_DAEMON_CONFIGURATION;
+    delete environment.SZAL_LLMTRIM_ENVIRONMENT_STATE;
     return environment;
   }
   const upstream = environment.LLMTRIM_UPSTREAM_PROXY;
@@ -712,7 +710,7 @@ const passThroughEnvironment = (
     }
     ownedProxy = true;
     if (upstream === undefined) {
-      delete environment[key];
+      Reflect.deleteProperty(environment, key);
     } else {
       environment[key] = upstream;
     }
@@ -724,8 +722,8 @@ const passThroughEnvironment = (
     delete environment.LLMTRIM_FIRST_ARRIVAL_RECALL;
     delete environment.LLMTRIM_PRESET;
   }
-  delete environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
-  delete environment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
+  delete environment.SZAL_LLMTRIM_DAEMON_CONFIGURATION;
+  delete environment.SZAL_LLMTRIM_ENVIRONMENT_STATE;
   return environment;
 };
 
@@ -1181,11 +1179,11 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
       }
       const startEnvironment = enabledEnvironment(context, request, "", knownProxyUrl);
       for (const key of PROXY_ENVIRONMENT_KEYS) {
-        delete startEnvironment[key];
+        Reflect.deleteProperty(startEnvironment, key);
       }
       delete startEnvironment.NODE_EXTRA_CA_CERTS;
-      delete startEnvironment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
-      delete startEnvironment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
+      delete startEnvironment.SZAL_LLMTRIM_DAEMON_CONFIGURATION;
+      delete startEnvironment.SZAL_LLMTRIM_ENVIRONMENT_STATE;
       const start = await invoke(
         context,
         LLMTRIM_COMMAND,

@@ -2,7 +2,9 @@
 
 Szal is an agent-agnostic context virtualization layer for terminal-based coding agents.
 
-This repository currently contains the TypeScript CLI, persistent storage, global configuration, shell state, telemetry, adapter contracts, and compression ownership policy.
+This repository currently contains the TypeScript CLI, persistent storage, global configuration,
+shell state, telemetry, adapter contracts, compression ownership policy, and an exported llmtrim
+engine adapter. End-to-end agent orchestration remains a later milestone.
 
 ## Requirements
 
@@ -152,12 +154,16 @@ The llmtrim adapter uses the upstream CLI's scriptable surfaces: `--version`, `s
 `start`, and `stop`. Installation uses the official `@llmtrim/cli` npm package and verifies the
 binary afterward. Command execution is shell-free and injectable for tests.
 
+Health details and capability results are machine-readable. Request recovery is unavailable before
+llmtrim 0.12.0, available only when enabled for the verified running daemon, and otherwise degraded
+or unavailable with a stable issue code.
+
 Claude transport configuration returns an environment for the new agent process. Existing proxies
 are retained as `LLMTRIM_UPSTREAM_PROXY`, local-network bypasses are merged with the user's
 `NO_PROXY`, and OFF mode restores the upstream proxy instead of routing through llmtrim. The
 adapter never describes compression as enabled unless the daemon, port, and Claude launch
 environment are healthy together.
 
-`readTelemetry` returns cumulative llmtrim token counters. Snapshot deltas become ledger-ready
-compression measurements, while OFF mode records equal before/after bytes and tokens. Recall
-metadata extraction retains only llmtrim's opaque handles, not the raw tool output.
+`readTelemetry` returns cumulative llmtrim token counters. Snapshot deltas become approximate,
+ledger-ready compression measurements, while OFF mode records equal before/after bytes and tokens.
+Recall metadata extraction retains only llmtrim's opaque handles, not the raw tool output.
