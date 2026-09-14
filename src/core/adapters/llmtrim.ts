@@ -17,7 +17,9 @@ import {
 
 const LLMTRIM_COMMAND = "llmtrim";
 const LLMTRIM_PACKAGE = "@llmtrim/cli@latest";
+const SZAL_LLMTRIM_PROXY_URL = "SZAL_LLMTRIM_PROXY_URL";
 const COMMAND_TIMEOUT_MS = 10_000;
+const PROXY_ENVIRONMENT_KEYS = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] as const;
 const LOOPBACK_BYPASS = [
   "localhost",
   "127.0.0.1",
@@ -88,6 +90,7 @@ export interface LlmtrimHealthDetails {
   daemonVersion?: string;
   environmentPort?: number;
   lastRequestAt?: string;
+  pid?: number;
   port?: number;
   portAccepting: boolean;
   requests: number;
@@ -179,6 +182,7 @@ interface ParsedLlmtrimStatus {
     binaryVersion?: string;
     environmentPort?: number;
     health: "degraded" | "healthy" | "stopped";
+    pid?: number;
     port?: number;
     portAccepting: boolean;
     restarts: number;
@@ -280,6 +284,7 @@ const parseStatus = (stdout: string): ParsedLlmtrimStatus | undefined => {
   }
 
   const port = nonNegativeNumber(daemon.port);
+  const pid = nonNegativeNumber(daemon.pid);
   const environmentPort = nonNegativeNumber(daemon.env_port);
   const restarts = nonNegativeNumber(daemon.restarts) ?? 0;
   const binaryVersion = optionalString(daemon.binary_version);
@@ -293,6 +298,7 @@ const parseStatus = (stdout: string): ParsedLlmtrimStatus | undefined => {
       ...(binaryVersion === undefined ? {} : { binaryVersion }),
       ...(environmentPort === undefined ? {} : { environmentPort }),
       health: health as ParsedLlmtrimStatus["daemon"]["health"],
+      ...(pid === undefined ? {} : { pid }),
       ...(port === undefined ? {} : { port }),
       portAccepting: daemon.port_accepting,
       restarts,
@@ -344,16 +350,41 @@ const mergeNoProxy = (current: string | undefined): string => {
   return [...entries].join(",");
 };
 
-const isLlmtrimProxy = (value: string | undefined): boolean =>
-  value !== undefined && /^http:\/\/(?:127\.0\.0\.1|localhost):\d+\/?$/u.test(value);
-
 const caPath = (context: AdapterContext): string =>
   join(context.environment.LLMTRIM_HOME ?? join(context.homeDirectory, ".llmtrim"), "ca.pem");
 
+const effectiveProxy = (
+  environment: Readonly<Record<string, string | undefined>>,
+): string | undefined =>
+  environment.https_proxy ??
+  environment.HTTPS_PROXY ??
+  environment.http_proxy ??
+  environment.HTTP_PROXY;
+
 const contextRoutesToPort = (context: AdapterContext, port: number): boolean => {
   const proxyUrl = `http://127.0.0.1:${String(port)}`;
-  const proxy = context.environment.HTTPS_PROXY ?? context.environment.HTTP_PROXY;
-  return proxy === proxyUrl && context.environment.NODE_EXTRA_CA_CERTS === caPath(context);
+  const httpsProxy = context.environment.https_proxy ?? context.environment.HTTPS_PROXY;
+  const httpProxy = context.environment.http_proxy ?? context.environment.HTTP_PROXY;
+  return (
+    httpsProxy === proxyUrl &&
+    httpProxy === proxyUrl &&
+    context.environment.NODE_EXTRA_CA_CERTS === caPath(context)
+  );
+};
+
+const isLlmtrimProxy = (
+  context: AdapterContext,
+  value: string | undefined,
+  knownProxyUrl?: string,
+): boolean =>
+  value !== undefined &&
+  (value === knownProxyUrl || value === context.environment[SZAL_LLMTRIM_PROXY_URL]);
+
+const upstreamProxy = (context: AdapterContext, knownProxyUrl?: string): string | undefined => {
+  const proxy = effectiveProxy(context.environment);
+  return proxy !== undefined && !isLlmtrimProxy(context, proxy, knownProxyUrl)
+    ? proxy
+    : context.environment.LLMTRIM_UPSTREAM_PROXY;
 };
 
 // Build the environment for a new Claude process while retaining a previous proxy as upstream.
@@ -361,26 +392,30 @@ const enabledEnvironment = (
   context: AdapterContext,
   request: LlmtrimConfigureRequest,
   proxyUrl: string,
+  knownProxyUrl?: string,
 ): Record<string, string> => {
   const environment = definedEnvironment(context.environment);
-  const existingProxy = context.environment.HTTPS_PROXY ?? context.environment.HTTP_PROXY;
-  if (
-    existingProxy !== undefined &&
-    existingProxy !== proxyUrl &&
-    !isLlmtrimProxy(existingProxy) &&
-    environment.LLMTRIM_UPSTREAM_PROXY === undefined
-  ) {
-    environment.LLMTRIM_UPSTREAM_PROXY = existingProxy;
+  const upstream = upstreamProxy(context, knownProxyUrl);
+  if (upstream === undefined) {
+    delete environment.LLMTRIM_UPSTREAM_PROXY;
+  } else {
+    environment.LLMTRIM_UPSTREAM_PROXY = upstream;
   }
   const noProxy = mergeNoProxy(context.environment.NO_PROXY ?? context.environment.no_proxy);
-  environment.HTTPS_PROXY = proxyUrl;
-  environment.HTTP_PROXY = proxyUrl;
+  for (const key of PROXY_ENVIRONMENT_KEYS) {
+    environment[key] = proxyUrl;
+  }
   environment.NO_PROXY = noProxy;
   environment.no_proxy = noProxy;
   environment.NODE_EXTRA_CA_CERTS = caPath(context);
   environment.NODE_USE_ENV_PROXY = "1";
   environment.LLMTRIM_PRESET = request.preset;
   environment.LLMTRIM_FIRST_ARRIVAL_RECALL = String(request.enableRecovery);
+  if (proxyUrl.length === 0) {
+    delete environment[SZAL_LLMTRIM_PROXY_URL];
+  } else {
+    environment[SZAL_LLMTRIM_PROXY_URL] = proxyUrl;
+  }
   return environment;
 };
 
@@ -388,18 +423,14 @@ const enabledEnvironment = (
 const passThroughEnvironment = (context: AdapterContext): Record<string, string> => {
   const environment = definedEnvironment(context.environment);
   const upstream = environment.LLMTRIM_UPSTREAM_PROXY;
-  if (isLlmtrimProxy(environment.HTTPS_PROXY)) {
-    if (upstream === undefined) {
-      delete environment.HTTPS_PROXY;
-    } else {
-      environment.HTTPS_PROXY = upstream;
+  for (const key of PROXY_ENVIRONMENT_KEYS) {
+    if (!isLlmtrimProxy(context, environment[key])) {
+      continue;
     }
-  }
-  if (isLlmtrimProxy(environment.HTTP_PROXY)) {
     if (upstream === undefined) {
-      delete environment.HTTP_PROXY;
+      delete environment[key];
     } else {
-      environment.HTTP_PROXY = upstream;
+      environment[key] = upstream;
     }
   }
   if (environment.NODE_EXTRA_CA_CERTS === caPath(context)) {
@@ -407,6 +438,7 @@ const passThroughEnvironment = (context: AdapterContext): Record<string, string>
   }
   delete environment.LLMTRIM_FIRST_ARRIVAL_RECALL;
   delete environment.LLMTRIM_PRESET;
+  delete environment[SZAL_LLMTRIM_PROXY_URL];
   return environment;
 };
 
@@ -420,6 +452,7 @@ const healthDetails = (status?: ParsedLlmtrimStatus): LlmtrimHealthDetails => ({
     ? {}
     : { environmentPort: status.daemon.environmentPort }),
   ...(status?.lastRequestAt === undefined ? {} : { lastRequestAt: status.lastRequestAt }),
+  ...(status?.daemon.pid === undefined ? {} : { pid: status.daemon.pid }),
   ...(status?.daemon.port === undefined ? {} : { port: status.daemon.port }),
   portAccepting: status?.daemon.portAccepting ?? false,
   requests: status?.requests ?? 0,
@@ -473,7 +506,9 @@ export const extractLlmtrimRecallReferences = (
   content: string,
 ): readonly LlmtrimRecallReference[] => {
   const handles = new Set<string>();
-  for (const match of content.matchAll(/\bllmtrim\s+recall\s+(r_[A-Za-z0-9_-]{43})\b/gu)) {
+  for (const match of content.matchAll(
+    /\[llmtrim: full output: llmtrim recall (r_[A-Za-z0-9_-]{43}); if unavailable, re-run the tool\]/gu,
+  )) {
     const handle = match[1];
     if (handle !== undefined) {
       handles.add(handle);
@@ -486,7 +521,14 @@ export const extractLlmtrimRecallReferences = (
 export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}): LlmtrimAdapter => {
   const runCommand = options.runCommand ?? defaultRunCommand;
   const now = options.now ?? (() => new Date());
-  let verifiedRecovery: boolean | undefined;
+  let verifiedDaemonConfiguration:
+    | {
+        enableRecovery: boolean;
+        pid: number;
+        preset: LlmtrimPreset;
+        upstreamProxy?: string;
+      }
+    | undefined;
 
   const invoke = (
     context: AdapterContext,
@@ -574,14 +616,6 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
       };
     }
     if (probe.value.daemon.health === "degraded") {
-      if (
-        details.running &&
-        details.portAccepting &&
-        details.port !== undefined &&
-        contextRoutesToPort(context, details.port)
-      ) {
-        return { details, issues: [], status: "healthy" };
-      }
       return {
         details,
         issues: [
@@ -589,6 +623,21 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
             code: "llmtrim-unhealthy",
             message: "The llmtrim interceptor health chain is degraded.",
             remediation: "Run llmtrim doctor, then retry configuration.",
+            retryable: true,
+          },
+        ],
+        status: "degraded",
+      };
+    }
+    if (details.port === undefined || !contextRoutesToPort(context, details.port)) {
+      return {
+        details,
+        issues: [
+          {
+            code: "llmtrim-transport-unconfigured",
+            message:
+              "The Claude environment does not route HTTP and HTTPS traffic through llmtrim.",
+            remediation: "Configure the Claude transport through the llmtrim adapter.",
             retryable: true,
           },
         ],
@@ -641,6 +690,11 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
               "required",
               currentHealth.issues[0] ?? DAEMON_STOPPED_ISSUE,
             );
+    const recoveryVerified =
+      verifiedDaemonConfiguration !== undefined &&
+      verifiedDaemonConfiguration.pid === currentHealth.details.pid
+        ? verifiedDaemonConfiguration.enableRecovery
+        : undefined;
     const recovery =
       currentHealth.status !== "healthy"
         ? unavailableCapability(
@@ -648,19 +702,19 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
             "optional",
             currentHealth.issues[0] ?? DAEMON_STOPPED_ISSUE,
           )
-        : verifiedRecovery === true
+        : recoveryVerified === true
           ? availableCapability("request-recovery" as const, "optional")
           : degradedCapability("request-recovery" as const, "optional", {
               code:
-                verifiedRecovery === false
+                recoveryVerified === false
                   ? "llmtrim-recovery-disabled"
                   : "llmtrim-recovery-unverified",
               message:
-                verifiedRecovery === false
+                recoveryVerified === false
                   ? "Recoverable first-arrival shaping is disabled."
                   : "The running daemon does not expose whether request recovery is enabled.",
               remediation:
-                verifiedRecovery === false
+                recoveryVerified === false
                   ? "Configure the Claude transport with enableRecovery set to true."
                   : "Restart the daemon through the adapter to verify request recovery.",
               retryable: false,
@@ -734,16 +788,42 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
     }
 
     let currentHealth = await health(context);
+    const knownProxyPort = currentHealth.details.port ?? currentHealth.details.environmentPort;
+    const knownProxyUrl =
+      knownProxyPort === undefined ? undefined : `http://127.0.0.1:${String(knownProxyPort)}`;
+    const upstream = upstreamProxy(context, knownProxyUrl);
+    const daemonConfigurationMatches =
+      currentHealth.details.pid !== undefined &&
+      verifiedDaemonConfiguration?.pid === currentHealth.details.pid &&
+      verifiedDaemonConfiguration.preset === request.preset &&
+      verifiedDaemonConfiguration.enableRecovery === request.enableRecovery &&
+      verifiedDaemonConfiguration.upstreamProxy === upstream;
     let started = false;
-    if (
-      currentHealth.status === "unavailable" &&
-      currentHealth.issues.some(({ code }) => code === "llmtrim-daemon-stopped")
-    ) {
-      const startEnvironment = enabledEnvironment(context, request, "");
-      delete startEnvironment.HTTPS_PROXY;
-      delete startEnvironment.HTTP_PROXY;
+    if (!daemonConfigurationMatches) {
+      const canStart =
+        currentHealth.status === "unavailable" &&
+        currentHealth.issues.some(({ code }) => code === "llmtrim-daemon-stopped");
+      if (!canStart && !currentHealth.details.running) {
+        return {
+          changed: false,
+          issue: currentHealth.issues[0] ?? {
+            code: "llmtrim-unhealthy",
+            message: "llmtrim could not verify a running interceptor before configuration.",
+            remediation: "Run llmtrim doctor and retry configuration.",
+            retryable: true,
+          },
+          rolledBack: true,
+          status: "failed",
+        };
+      }
+      const startEnvironment = enabledEnvironment(context, request, "", knownProxyUrl);
+      for (const key of PROXY_ENVIRONMENT_KEYS) {
+        delete startEnvironment[key];
+      }
       delete startEnvironment.NODE_EXTRA_CA_CERTS;
-      const start = await invoke(context, LLMTRIM_COMMAND, ["start"], startEnvironment);
+      const startArguments = currentHealth.details.running ? ["start", "--force"] : ["start"];
+      verifiedDaemonConfiguration = undefined;
+      const start = await invoke(context, LLMTRIM_COMMAND, startArguments, startEnvironment);
       if (start.exitCode !== 0) {
         return {
           changed: false,
@@ -766,6 +846,7 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
         context,
         request,
         `http://127.0.0.1:${String(currentHealth.details.port)}`,
+        knownProxyUrl,
       );
       currentHealth = await health({ ...context, environment });
     }
@@ -785,11 +866,20 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
     }
 
     const proxyUrl = `http://127.0.0.1:${String(currentHealth.details.port)}`;
-    const environment = enabledEnvironment(context, request, proxyUrl);
+    const environment = enabledEnvironment(context, request, proxyUrl, knownProxyUrl);
     const changed = started || !environmentEquals(context.environment, environment);
-    if (started) {
-      verifiedRecovery = request.enableRecovery;
+    if (started && currentHealth.details.pid !== undefined) {
+      verifiedDaemonConfiguration = {
+        enableRecovery: request.enableRecovery,
+        pid: currentHealth.details.pid,
+        preset: request.preset,
+        ...(upstream === undefined ? {} : { upstreamProxy: upstream }),
+      };
     }
+    const recoveryVerified =
+      verifiedDaemonConfiguration !== undefined &&
+      verifiedDaemonConfiguration.pid === currentHealth.details.pid &&
+      verifiedDaemonConfiguration.enableRecovery === request.enableRecovery;
     return {
       changed,
       details: {
@@ -798,11 +888,11 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
         health: currentHealth.status,
         measurementSource: "llmtrim-status",
         proxyUrl,
-        recovery: request.enableRecovery
-          ? verifiedRecovery === true
+        recovery: recoveryVerified
+          ? request.enableRecovery
             ? "enabled"
-            : "unverified"
-          : "disabled",
+            : "disabled"
+          : "unverified",
       },
       requiresRestart: !environmentEquals(context.environment, environment),
       status: "succeeded",
@@ -841,7 +931,7 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
         status: "failed",
       };
     }
-    verifiedRecovery = undefined;
+    verifiedDaemonConfiguration = undefined;
     return { changed: true, requiresRestart: true, status: "succeeded" };
   };
 

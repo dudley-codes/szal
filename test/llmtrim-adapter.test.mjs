@@ -47,11 +47,24 @@ test("llmtrim detection reports version, health, and machine-readable capabiliti
       return commandResult(JSON.stringify(HEALTHY_STATUS));
     },
   });
+  const routedContext = context({
+    HTTPS_PROXY: "http://127.0.0.1:43117",
+    HTTP_PROXY: "http://127.0.0.1:43117",
+    NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+    http_proxy: "http://127.0.0.1:43117",
+    https_proxy: "http://127.0.0.1:43117",
+  });
 
   const detection = await adapter.detect(context());
   const version = await adapter.version(context());
-  const health = await adapter.health(context());
-  const capabilities = await adapter.capabilities(context());
+  const health = await adapter.health(routedContext);
+  const bypassedHealth = await adapter.health(
+    context({
+      ...routedContext.environment,
+      https_proxy: "http://corporate-proxy.test:8080",
+    }),
+  );
+  const capabilities = await adapter.capabilities(routedContext);
 
   assert.deepEqual(detection, {
     details: { command: "llmtrim", version: "0.13.4" },
@@ -61,6 +74,8 @@ test("llmtrim detection reports version, health, and machine-readable capabiliti
   assert.equal(health.status, "healthy");
   assert.equal(health.details.running, true);
   assert.equal(health.details.port, 43117);
+  assert.equal(bypassedHealth.status, "degraded");
+  assert.equal(bypassedHealth.issues[0].code, "llmtrim-transport-unconfigured");
   assert.deepEqual(
     capabilities.map(({ importance, name, status }) => ({ importance, name, status })),
     [
@@ -140,6 +155,7 @@ test("installation is idempotent and verifies the installed binary", async () =>
 
 test("Claude transport startup composes an existing proxy and is idempotent", async () => {
   let running = false;
+  let pid = 42;
   const calls = [];
   const adapter = createLlmtrimAdapter({
     runCommand: async (invocation) => {
@@ -149,12 +165,25 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
       }
       if (invocation.arguments[0] === "start") {
         running = true;
+        pid += 1;
         return commandResult("Interceptor running\n");
       }
+      const proxyUrl = "http://127.0.0.1:43117";
+      const environmentConfigured = [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+      ].every((key) => invocation.environment[key] === proxyUrl);
       const status = running
         ? {
             ...HEALTHY_STATUS,
-            daemon: { ...HEALTHY_STATUS.daemon, env_port: null, health: "degraded" },
+            daemon: {
+              ...HEALTHY_STATUS.daemon,
+              env_port: environmentConfigured ? 43117 : null,
+              health: environmentConfigured ? "healthy" : "degraded",
+              pid,
+            },
           }
         : {
             ...HEALTHY_STATUS,
@@ -174,9 +203,10 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
     },
   });
   const initialContext = context({
-    HTTPS_PROXY: "http://corporate-proxy.test:8080",
+    HTTPS_PROXY: "http://ignored-proxy.test:8080",
     LLMTRIM_HOME: "/var/lib/llmtrim",
     NO_PROXY: "internal.test",
+    https_proxy: "http://127.0.0.1:7890",
   });
 
   const first = await adapter.configure(initialContext, {
@@ -192,12 +222,15 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
   assert.equal(first.details.recovery, "enabled");
   assert.equal(first.details.environment.HTTPS_PROXY, "http://127.0.0.1:43117");
   assert.equal(first.details.environment.HTTP_PROXY, "http://127.0.0.1:43117");
+  assert.equal(first.details.environment.https_proxy, "http://127.0.0.1:43117");
+  assert.equal(first.details.environment.http_proxy, "http://127.0.0.1:43117");
+  assert.equal(first.details.environment.SZAL_LLMTRIM_PROXY_URL, "http://127.0.0.1:43117");
   assert.equal(first.details.environment.NODE_EXTRA_CA_CERTS, "/var/lib/llmtrim/ca.pem");
   assert.match(first.details.environment.NO_PROXY, /internal\.test/);
   assert.match(first.details.environment.NO_PROXY, /localhost/);
 
   const startCall = calls.find(({ arguments: arguments_ }) => arguments_[0] === "start");
-  assert.equal(startCall.environment.LLMTRIM_UPSTREAM_PROXY, "http://corporate-proxy.test:8080");
+  assert.equal(startCall.environment.LLMTRIM_UPSTREAM_PROXY, "http://127.0.0.1:7890");
   assert.equal(startCall.environment.LLMTRIM_FIRST_ARRIVAL_RECALL, "true");
   assert.equal(startCall.environment.LLMTRIM_PRESET, "auto");
 
@@ -218,6 +251,61 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
   );
 });
 
+test("running daemon settings are restarted only when configuration changes", async () => {
+  let pid = 42;
+  const calls = [];
+  const adapter = createLlmtrimAdapter({
+    runCommand: async (invocation) => {
+      calls.push(invocation);
+      if (invocation.arguments[0] === "--version") {
+        return commandResult("llmtrim 0.13.4\n");
+      }
+      if (invocation.arguments[0] === "start") {
+        pid += 1;
+        return commandResult("Interceptor running\n");
+      }
+      return commandResult(
+        JSON.stringify({
+          ...HEALTHY_STATUS,
+          daemon: { ...HEALTHY_STATUS.daemon, pid },
+        }),
+      );
+    },
+  });
+
+  const first = await adapter.configure(context(), {
+    enableRecovery: true,
+    host: "claude",
+    mode: "on",
+    preset: "auto",
+  });
+  const second = await adapter.configure(context(first.details.environment), {
+    enableRecovery: false,
+    host: "claude",
+    mode: "on",
+    preset: "safe",
+  });
+  const third = await adapter.configure(context(second.details.environment), {
+    enableRecovery: false,
+    host: "claude",
+    mode: "on",
+    preset: "safe",
+  });
+
+  const startCalls = calls.filter(({ arguments: arguments_ }) => arguments_[0] === "start");
+  assert.equal(first.status, "succeeded");
+  assert.equal(first.details.recovery, "enabled");
+  assert.equal(second.status, "succeeded");
+  assert.equal(second.details.recovery, "disabled");
+  assert.equal(third.status, "succeeded");
+  assert.equal(third.changed, false);
+  assert.equal(startCalls.length, 2);
+  assert.deepEqual(startCalls[0].arguments, ["start", "--force"]);
+  assert.deepEqual(startCalls[1].arguments, ["start", "--force"]);
+  assert.equal(startCalls[1].environment.LLMTRIM_PRESET, "safe");
+  assert.equal(startCalls[1].environment.LLMTRIM_FIRST_ARRIVAL_RECALL, "false");
+});
+
 test("OFF mode restores the upstream proxy and records byte-identical pass-through", async () => {
   const adapter = createLlmtrimAdapter({
     runCommand: async () => commandResult("llmtrim 0.13.4\n"),
@@ -226,11 +314,22 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
     context({
       HTTPS_PROXY: "http://127.0.0.1:43117",
       HTTP_PROXY: "http://127.0.0.1:43117",
+      https_proxy: "http://127.0.0.1:43117",
+      http_proxy: "http://127.0.0.1:43117",
+      LLMTRIM_FIRST_ARRIVAL_RECALL: "true",
       LLMTRIM_UPSTREAM_PROXY: "http://corporate-proxy.test:8080",
+      LLMTRIM_PRESET: "auto",
       NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+      SZAL_LLMTRIM_PROXY_URL: "http://127.0.0.1:43117",
     }),
     { enableRecovery: false, host: "claude", mode: "off", preset: "auto" },
   );
+  const localProxy = await adapter.configure(context({ https_proxy: "http://127.0.0.1:7890" }), {
+    enableRecovery: false,
+    host: "claude",
+    mode: "off",
+    preset: "auto",
+  });
   const measurement = createLlmtrimPassThroughMeasurement({
     model: "claude-sonnet",
     provider: "anthropic",
@@ -242,7 +341,12 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
   assert.equal(off.details.compression, "pass-through");
   assert.equal(off.details.environment.HTTPS_PROXY, "http://corporate-proxy.test:8080");
   assert.equal(off.details.environment.HTTP_PROXY, "http://corporate-proxy.test:8080");
+  assert.equal(off.details.environment.https_proxy, "http://corporate-proxy.test:8080");
+  assert.equal(off.details.environment.http_proxy, "http://corporate-proxy.test:8080");
   assert.equal("NODE_EXTRA_CA_CERTS" in off.details.environment, false);
+  assert.equal("SZAL_LLMTRIM_PROXY_URL" in off.details.environment, false);
+  assert.equal(localProxy.changed, false);
+  assert.equal(localProxy.details.environment.https_proxy, "http://127.0.0.1:7890");
   assert.deepEqual(measurement, {
     approximate: false,
     compressed: false,
@@ -261,7 +365,7 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
 test("unhealthy startup never reports successful compression", async () => {
   const degraded = {
     ...HEALTHY_STATUS,
-    daemon: { ...HEALTHY_STATUS.daemon, health: "degraded", port_accepting: false },
+    daemon: { ...HEALTHY_STATUS.daemon, health: "degraded" },
   };
   const adapter = createLlmtrimAdapter({
     runCommand: async (invocation) =>
@@ -270,17 +374,28 @@ test("unhealthy startup never reports successful compression", async () => {
         : commandResult(JSON.stringify(degraded)),
   });
 
-  const result = await adapter.configure(context(), {
-    enableRecovery: false,
-    host: "claude",
-    mode: "on",
-    preset: "auto",
-  });
+  const result = await adapter.configure(
+    context({
+      HTTPS_PROXY: "http://127.0.0.1:43117",
+      HTTP_PROXY: "http://127.0.0.1:43117",
+      LLMTRIM_PRESET: "auto",
+      NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+      SZAL_LLMTRIM_PROXY_URL: "http://127.0.0.1:43117",
+      http_proxy: "http://127.0.0.1:43117",
+      https_proxy: "http://127.0.0.1:43117",
+    }),
+    {
+      enableRecovery: false,
+      host: "claude",
+      mode: "on",
+      preset: "auto",
+    },
+  );
 
   assert.equal(result.status, "failed");
   assert.equal(result.issue.code, "llmtrim-unhealthy");
-  assert.equal(result.changed, false);
-  assert.equal(result.rolledBack, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.rolledBack, false);
 });
 
 test("telemetry snapshots, deltas, and recall references are ledger-ready", async () => {
@@ -328,8 +443,12 @@ test("telemetry snapshots, deltas, and recall references are ledger-ready", asyn
   });
   assert.deepEqual(
     extractLlmtrimRecallReferences(
-      `shortened output [llmtrim: full output: llmtrim recall ${handle}; if unavailable] ${handle}`,
+      `shortened output [llmtrim: full output: llmtrim recall ${handle}; if unavailable, re-run the tool] ${handle}`,
     ),
     [{ handle }],
+  );
+  assert.deepEqual(
+    extractLlmtrimRecallReferences(`documentation says llmtrim recall ${handle}`),
+    [],
   );
 });
