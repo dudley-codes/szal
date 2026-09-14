@@ -10,7 +10,13 @@ Usage:
 
 Commands:
   help       Show command help
+  shell      Install, uninstall, or restore bash/zsh integration
   version    Show the installed version
+
+Shell integration:
+  szal shell install [bash|zsh] [--terminal-id]
+  szal shell uninstall [bash|zsh]
+  szal shell restore [bash|zsh]
 
 Options:
   -h, --help       Show command help

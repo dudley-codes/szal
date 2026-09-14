@@ -33,14 +33,30 @@ const runExecutable = (arguments_, cwd = process.cwd()) =>
 
 test("help aliases resolve to one command", () => {
   for (const alias of ["help", "--help", "-h"]) {
-    assert.deepEqual(parseArguments([alias]), { command: "help", kind: "command" });
+    assert.deepEqual(parseArguments([alias]), {
+      arguments_: [],
+      command: "help",
+      kind: "command",
+    });
   }
 });
 
 test("version aliases resolve to one command", () => {
   for (const alias of ["version", "--version", "-v"]) {
-    assert.deepEqual(parseArguments([alias]), { command: "version", kind: "command" });
+    assert.deepEqual(parseArguments([alias]), {
+      arguments_: [],
+      command: "version",
+      kind: "command",
+    });
   }
+});
+
+test("shell subcommands retain their arguments for the handler", () => {
+  assert.deepEqual(parseArguments(["shell", "install", "zsh", "--terminal-id"]), {
+    arguments_: ["install", "zsh", "--terminal-id"],
+    command: "shell",
+    kind: "command",
+  });
 });
 
 test("no arguments show help", () => {

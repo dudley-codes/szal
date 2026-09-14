@@ -60,7 +60,19 @@ After linking, the currently implemented commands are:
 ```bash
 szal help
 szal --version
+szal shell install [bash|zsh] [--terminal-id]
+szal shell uninstall [bash|zsh]
+szal shell restore [bash|zsh]
 ```
+
+Shell installation appends a clearly marked function to `~/.bashrc` or `~/.zshrc`. The
+function changes `SZAL_ENABLED` in the current terminal for `szal on`/`szal -on` and
+`szal off`/`szal -off`; other commands continue to the installed executable. Pass
+`--terminal-id` to set a terminal-local `SZAL_TERMINAL_ID` without writing shared state.
+Szal creates a private timestamped backup before every configuration change, validates
+the result with the selected shell, and leaves the original untouched if validation fails.
+Uninstall removes only the marked block. Restore replaces the configuration with its most
+recent Szal backup.
 
 ## Design constraints
 

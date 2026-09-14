@@ -1,4 +1,8 @@
+import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
+
 import { runHelp } from "./commands/help.js";
+import { runShell } from "./commands/shell.js";
 import type { CommandHandler } from "./commands/types.js";
 import { runVersion } from "./commands/version.js";
 import { parseArguments, type CliCommandName } from "./parse-arguments.js";
@@ -9,11 +13,14 @@ export interface CliIo {
 }
 
 export interface CliOptions {
+  environment?: NodeJS.ProcessEnv;
+  homeDirectory?: string;
   version: string;
 }
 
 const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   help: runHelp,
+  shell: runShell,
   version: runVersion,
 };
 
@@ -33,6 +40,13 @@ export const runCli = (
   io: CliIo = DEFAULT_IO,
 ): number => {
   const parsedArguments = parseArguments(arguments_);
+  const environment = options.environment ?? process.env;
+  const environmentHome = environment.HOME;
+  const homeDirectory =
+    options.homeDirectory ??
+    (environmentHome !== undefined && environmentHome.length > 0 && isAbsolute(environmentHome)
+      ? environmentHome
+      : homedir());
 
   if (parsedArguments.kind === "invalid") {
     io.stderr(`Unknown command: ${parsedArguments.input || "(empty)"}`);
@@ -41,6 +55,10 @@ export const runCli = (
   }
 
   return COMMAND_HANDLERS[parsedArguments.command]({
+    arguments_: parsedArguments.arguments_,
+    environment,
+    homeDirectory,
+    stderr: io.stderr,
     stdout: io.stdout,
     version: options.version,
   });
