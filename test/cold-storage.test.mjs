@@ -301,6 +301,107 @@ test("size enforcement evicts the oldest object deterministically and rejects ov
   }
 });
 
+test("deduplicated stores preserve prior references while enforcing a reduced limit", () => {
+  const storage = createStorage();
+  const originalPolicy = { enabled: true, maxBytes: 10, retentionDays: 0 };
+  const reducedPolicy = { enabled: true, maxBytes: 8, retentionDays: 0 };
+
+  try {
+    const first = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      { category: "memory", createdAt: START.toISOString(), referenceId: "reference-1" },
+      { now: START, policy: originalPolicy },
+    );
+    const second = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "bbbb",
+      {
+        category: "memory",
+        createdAt: new Date(START.getTime() + DAY_MS).toISOString(),
+        referenceId: "reference-2",
+      },
+      { now: new Date(START.getTime() + DAY_MS), policy: originalPolicy },
+    );
+
+    storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      {
+        category: "memory",
+        createdAt: new Date(START.getTime() + 2 * DAY_MS).toISOString(),
+        referenceId: "reference-3",
+      },
+      { now: new Date(START.getTime() + 2 * DAY_MS), policy: reducedPolicy },
+    );
+
+    assert.equal(
+      readColdObject(storage.database.connection, storage.database.paths, first.id).status,
+      "found",
+    );
+    assert.equal(
+      readColdObject(storage.database.connection, storage.database.paths, second.id).status,
+      "missing",
+    );
+    assert.deepEqual(
+      storage.database.connection
+        .prepare("SELECT id FROM cold_object_references WHERE cold_object_id = ? ORDER BY id")
+        .pluck()
+        .all(first.id),
+      ["reference-1", "reference-3"],
+    );
+  } finally {
+    closeStorage(storage);
+  }
+});
+
+test("invalid new references cannot trigger capacity eviction", () => {
+  const storage = createStorage();
+  const policy = { enabled: true, maxBytes: 10, retentionDays: 0 };
+
+  try {
+    const stored = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      { category: "memory", referenceId: "reference-1" },
+      { policy },
+    );
+
+    assert.throws(
+      () =>
+        storeColdObject(
+          storage.database.connection,
+          storage.database.paths,
+          "bbbbbb",
+          { category: "memory", referenceId: "reference-1" },
+          { policy },
+        ),
+      /reference reference-1 already exists/i,
+    );
+    assert.equal(
+      readColdObject(storage.database.connection, storage.database.paths, stored.id).status,
+      "found",
+    );
+    assert.equal(
+      storage.database.connection.prepare("SELECT SUM(raw_bytes) FROM cold_objects").pluck().get(),
+      6,
+    );
+    assert.equal(
+      storage.database.connection
+        .prepare("SELECT COUNT(*) FROM cold_storage_cleanup_items WHERE reason = 'size'")
+        .pluck()
+        .get(),
+      0,
+    );
+  } finally {
+    closeStorage(storage);
+  }
+});
+
 test("cleanup records file permission failures instead of claiming successful deletion", () => {
   const storage = createStorage();
   const policy = { enabled: true, maxBytes: 1_000, retentionDays: 0 };
@@ -337,6 +438,13 @@ test("cleanup records file permission failures instead of claiming successful de
     );
     assert.equal(
       storage.database.connection
+        .prepare("SELECT COUNT(*) FROM cold_object_references WHERE id = ?")
+        .pluck()
+        .get("reference-1"),
+      1,
+    );
+    assert.equal(
+      storage.database.connection
         .prepare(
           "SELECT file_status FROM cold_storage_cleanup_items WHERE run_id = ? AND item_kind = 'object'",
         )
@@ -351,7 +459,7 @@ test("cleanup records file permission failures instead of claiming successful de
       now: new Date(START.getTime() + 2 * DAY_MS),
     });
     assert.equal(retry.status, "completed");
-    assert.equal(retry.deletedObjects[0]?.reason, "orphan");
+    assert.equal(retry.deletedObjects[0]?.reason, "expiry");
     assert.equal(retry.deletedObjects[0]?.fileStatus, "deleted");
     assert.equal(retry.afterBytes, 0);
   } finally {

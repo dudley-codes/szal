@@ -127,14 +127,6 @@ interface PlannedColdObjectDeletion extends ColdObjectRow {
   reason: ColdStorageDeletionReason;
 }
 
-interface CleanupPlan {
-  afterBytes: number;
-  beforeBytes: number;
-  deletedBytes: number;
-  expiredReferenceIds: string[];
-  objects: PlannedColdObjectDeletion[];
-}
-
 export const DEFAULT_COLD_STORAGE_POLICY: ColdStoragePolicy = {
   enabled: DEFAULT_CONFIG.coldStorage.enabled,
   maxBytes: DEFAULT_CONFIG.coldStorage.maxBytes,
@@ -294,171 +286,6 @@ const effectiveReferenceExpiry = (
     : configuredExpiry;
 };
 
-// Plan and commit deterministic metadata removal before deleting payload files.
-const planCleanup = (
-  database: BetterSqlite3.Database,
-  policy: ColdStoragePolicy,
-  runId: string,
-  startedAt: string,
-  reserveBytes: number,
-): CleanupPlan => {
-  const cleanup = database.transaction((): CleanupPlan => {
-    const beforeBytes = Number(
-      database.prepare("SELECT COALESCE(SUM(raw_bytes), 0) FROM cold_objects").pluck().get(),
-    );
-    database
-      .prepare(
-        `INSERT INTO cold_storage_cleanup_runs (
-           id, status, retention_days, max_bytes, reserved_bytes, before_bytes,
-           after_bytes, started_at
-         ) VALUES (?, 'running', ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        runId,
-        policy.retentionDays,
-        policy.maxBytes,
-        reserveBytes,
-        beforeBytes,
-        beforeBytes,
-        startedAt,
-      );
-
-    const references = database
-      .prepare(
-        `SELECT id, cold_object_id, created_at, expires_at
-           FROM cold_object_references
-          ORDER BY created_at, id`,
-      )
-      .all() as ColdObjectReferenceRow[];
-    const expiredReferences = references
-      .map((reference) => ({
-        expiresAt: effectiveReferenceExpiry(reference, policy.retentionDays),
-        reference,
-      }))
-      .filter(
-        (entry): entry is { expiresAt: string; reference: ColdObjectReferenceRow } =>
-          entry.expiresAt !== undefined && entry.expiresAt <= startedAt,
-      )
-      .sort(
-        (left, right) =>
-          left.expiresAt.localeCompare(right.expiresAt) ||
-          left.reference.id.localeCompare(right.reference.id),
-      );
-    const expiredObjectIds = new Set(
-      expiredReferences.map(({ reference }) => reference.cold_object_id),
-    );
-    const insertItem = database.prepare(
-      `INSERT INTO cold_storage_cleanup_items (
-         run_id, item_kind, record_id, reason, relative_path, raw_bytes, file_status
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    );
-    const clearCompressionEvent = database.prepare(
-      "UPDATE compression_events SET cold_object_reference_id = NULL WHERE cold_object_reference_id = ?",
-    );
-    const deleteReference = database.prepare("DELETE FROM cold_object_references WHERE id = ?");
-
-    for (const { reference } of expiredReferences) {
-      insertItem.run(runId, "reference", reference.id, "expiry", null, null, "not_applicable");
-      clearCompressionEvent.run(reference.id);
-      deleteReference.run(reference.id);
-    }
-
-    const orphanedObjects = database
-      .prepare(
-        `SELECT id, content_hash, relative_path, raw_bytes, created_at
-           FROM cold_objects AS object
-          WHERE NOT EXISTS (
-            SELECT 1 FROM cold_object_references AS reference
-             WHERE reference.cold_object_id = object.id
-          )
-          ORDER BY created_at, id`,
-      )
-      .all() as ColdObjectRow[];
-    const objects = new Map<string, PlannedColdObjectDeletion>();
-    let afterBytes = beforeBytes;
-
-    for (const object of orphanedObjects) {
-      const reason: ColdStorageDeletionReason = expiredObjectIds.has(object.id)
-        ? "expiry"
-        : "orphan";
-      objects.set(object.id, { ...object, reason });
-      afterBytes -= object.raw_bytes;
-    }
-
-    const targetBytes = policy.maxBytes - reserveBytes;
-    if (afterBytes > targetBytes) {
-      const evictionCandidates = database
-        .prepare(
-          `SELECT object.id, object.content_hash, object.relative_path, object.raw_bytes,
-                  object.created_at, MIN(reference.created_at) AS oldest_reference
-             FROM cold_objects AS object
-             JOIN cold_object_references AS reference ON reference.cold_object_id = object.id
-            GROUP BY object.id
-            ORDER BY oldest_reference, object.created_at, object.id`,
-        )
-        .all() as Array<ColdObjectRow & { oldest_reference: string }>;
-      for (const object of evictionCandidates) {
-        if (afterBytes <= targetBytes) {
-          break;
-        }
-        objects.set(object.id, { ...object, reason: "size" });
-        afterBytes -= object.raw_bytes;
-      }
-    }
-
-    const listObjectReferences = database
-      .prepare("SELECT id FROM cold_object_references WHERE cold_object_id = ? ORDER BY id")
-      .pluck();
-    const clearRecall = database.prepare(
-      "UPDATE recalls SET cold_object_id = NULL WHERE cold_object_id = ?",
-    );
-    const deleteObject = database.prepare("DELETE FROM cold_objects WHERE id = ?");
-
-    for (const object of objects.values()) {
-      const referenceIds = listObjectReferences.all(object.id) as string[];
-      for (const referenceId of referenceIds) {
-        clearCompressionEvent.run(referenceId);
-      }
-      database
-        .prepare("DELETE FROM cold_object_references WHERE cold_object_id = ?")
-        .run(object.id);
-      clearRecall.run(object.id);
-      insertItem.run(
-        runId,
-        "object",
-        object.id,
-        object.reason,
-        object.relative_path,
-        object.raw_bytes,
-        "pending",
-      );
-      deleteObject.run(object.id);
-    }
-
-    const deletedBytes = [...objects.values()].reduce(
-      (total, object) => total + object.raw_bytes,
-      0,
-    );
-    database
-      .prepare(
-        `UPDATE cold_storage_cleanup_runs
-            SET after_bytes = ?, expired_references = ?, deleted_objects = ?, deleted_bytes = ?
-          WHERE id = ?`,
-      )
-      .run(afterBytes, expiredReferences.length, objects.size, deletedBytes, runId);
-
-    return {
-      afterBytes,
-      beforeBytes,
-      deletedBytes,
-      expiredReferenceIds: expiredReferences.map(({ reference }) => reference.id),
-      objects: [...objects.values()],
-    };
-  });
-
-  return cleanup.immediate();
-};
-
 const deleteColdPayload = (
   paths: StoragePaths,
   object: PlannedColdObjectDeletion,
@@ -501,59 +328,206 @@ const deleteColdPayload = (
   }
 };
 
-// Remove expired and over-limit data in stable order and persist an audit for every decision.
-export const cleanupColdStorage = (
+const executeCleanup = (
   database: BetterSqlite3.Database,
   paths: StoragePaths,
-  policy: ColdStoragePolicy = DEFAULT_COLD_STORAGE_POLICY,
-  options: ColdStorageCleanupOptions = {},
+  policy: ColdStoragePolicy,
+  startedAt: string,
+  reserveBytes: number,
+  protectedObjectId?: string,
 ): ColdStorageCleanupResult => {
-  validatePolicy(policy);
-  const reserveBytes = options.reserveBytes ?? 0;
-  assertNonNegativeInteger(reserveBytes, "Cold storage reserveBytes");
-  if (reserveBytes > policy.maxBytes) {
-    throw new Error("Reserved bytes exceed the configured cold storage limit.");
-  }
-  const startedAt = normalizeDate(options.now ?? new Date(), "Cold storage cleanup time");
   const runId = randomUUID();
-  const plan = planCleanup(database, policy, runId, startedAt, reserveBytes);
-  const updateItem = database.prepare(
-    `UPDATE cold_storage_cleanup_items
-        SET file_status = ?, error = ?
-      WHERE run_id = ? AND item_kind = 'object' AND record_id = ?`,
+  const beforeBytes = Number(
+    database.prepare("SELECT COALESCE(SUM(raw_bytes), 0) FROM cold_objects").pluck().get(),
   );
-  const deletedObjects = plan.objects.map((object): DeletedColdObject => {
-    const fileResult = deleteColdPayload(paths, object);
-    updateItem.run(fileResult.fileStatus, fileResult.error ?? null, runId, object.id);
-    if (fileResult.fileStatus === "failed") {
-      database
-        .prepare(
-          `INSERT INTO cold_objects (id, content_hash, relative_path, raw_bytes, created_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT (id) DO NOTHING`,
-        )
-        .run(
-          object.id,
-          object.content_hash,
-          object.relative_path,
-          object.raw_bytes,
-          object.created_at,
-        );
+  database
+    .prepare(
+      `INSERT INTO cold_storage_cleanup_runs (
+         id, status, retention_days, max_bytes, reserved_bytes, before_bytes,
+         after_bytes, started_at
+       ) VALUES (?, 'running', ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      runId,
+      policy.retentionDays,
+      policy.maxBytes,
+      reserveBytes,
+      beforeBytes,
+      beforeBytes,
+      startedAt,
+    );
+
+  const references = database
+    .prepare(
+      `SELECT id, cold_object_id, created_at, expires_at
+         FROM cold_object_references
+        ORDER BY created_at, id`,
+    )
+    .all() as ColdObjectReferenceRow[];
+  const expiredReferences = references
+    .map((reference) => ({
+      expiresAt: effectiveReferenceExpiry(reference, policy.retentionDays),
+      reference,
+    }))
+    .filter(
+      (entry): entry is { expiresAt: string; reference: ColdObjectReferenceRow } =>
+        entry.expiresAt !== undefined && entry.expiresAt <= startedAt,
+    )
+    .sort(
+      (left, right) =>
+        left.expiresAt.localeCompare(right.expiresAt) ||
+        left.reference.id.localeCompare(right.reference.id),
+    );
+  const expiredReferenceIds = new Set(
+    expiredReferences.map(({ reference }) => reference.id),
+  );
+  const activeReferences = references.filter(
+    (reference) => !expiredReferenceIds.has(reference.id),
+  );
+  const activeReferenceCount = new Map<string, number>();
+  for (const reference of activeReferences) {
+    activeReferenceCount.set(
+      reference.cold_object_id,
+      (activeReferenceCount.get(reference.cold_object_id) ?? 0) + 1,
+    );
+  }
+
+  const objects = database
+    .prepare(
+      "SELECT id, content_hash, relative_path, raw_bytes, created_at FROM cold_objects ORDER BY created_at, id",
+    )
+    .all() as ColdObjectRow[];
+  const expiredObjectIds = new Set(
+    expiredReferences.map(({ reference }) => reference.cold_object_id),
+  );
+  const orphanedObjects = objects
+    .filter((object) => (activeReferenceCount.get(object.id) ?? 0) === 0)
+    .map(
+      (object): PlannedColdObjectDeletion => ({
+        ...object,
+        reason: expiredObjectIds.has(object.id) ? "expiry" : "orphan",
+      }),
+    );
+  const oldestActiveReference = new Map<string, string>();
+  for (const reference of activeReferences) {
+    const oldest = oldestActiveReference.get(reference.cold_object_id);
+    if (oldest === undefined || reference.created_at < oldest) {
+      oldestActiveReference.set(reference.cold_object_id, reference.created_at);
     }
-    return {
+  }
+  const evictionCandidates = objects
+    .filter(
+      (object) =>
+        (activeReferenceCount.get(object.id) ?? 0) > 0 && object.id !== protectedObjectId,
+    )
+    .sort(
+      (left, right) =>
+        (oldestActiveReference.get(left.id) ?? "").localeCompare(
+          oldestActiveReference.get(right.id) ?? "",
+        ) || left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id),
+    )
+    .map((object): PlannedColdObjectDeletion => ({ ...object, reason: "size" }));
+
+  const insertItem = database.prepare(
+    `INSERT INTO cold_storage_cleanup_items (
+       run_id, item_kind, record_id, reason, relative_path, raw_bytes, file_status, error
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const clearCompressionEvent = database.prepare(
+    "UPDATE compression_events SET cold_object_reference_id = NULL WHERE cold_object_reference_id = ?",
+  );
+  const deleteReference = database.prepare("DELETE FROM cold_object_references WHERE id = ?");
+  const listObjectReferences = database
+    .prepare("SELECT id FROM cold_object_references WHERE cold_object_id = ? ORDER BY id")
+    .pluck();
+  const clearRecall = database.prepare(
+    "UPDATE recalls SET cold_object_id = NULL WHERE cold_object_id = ?",
+  );
+  const deleteObjectReferences = database.prepare(
+    "DELETE FROM cold_object_references WHERE cold_object_id = ?",
+  );
+  const deleteObject = database.prepare("DELETE FROM cold_objects WHERE id = ?");
+  const removedExpiredReferenceIds: string[] = [];
+  const deletedObjects: DeletedColdObject[] = [];
+  let afterBytes = beforeBytes;
+
+  const removeObject = (object: PlannedColdObjectDeletion): void => {
+    const fileResult = deleteColdPayload(paths, object);
+    if (fileResult.fileStatus !== "failed") {
+      const referenceIds = listObjectReferences.all(object.id) as string[];
+      for (const referenceId of referenceIds) {
+        if (expiredReferenceIds.has(referenceId)) {
+          insertItem.run(
+            runId,
+            "reference",
+            referenceId,
+            "expiry",
+            null,
+            null,
+            "not_applicable",
+            null,
+          );
+          removedExpiredReferenceIds.push(referenceId);
+        }
+        clearCompressionEvent.run(referenceId);
+      }
+      deleteObjectReferences.run(object.id);
+      clearRecall.run(object.id);
+      deleteObject.run(object.id);
+      afterBytes -= object.raw_bytes;
+    }
+    insertItem.run(
+      runId,
+      "object",
+      object.id,
+      object.reason,
+      object.relative_path,
+      object.raw_bytes,
+      fileResult.fileStatus,
+      fileResult.error ?? null,
+    );
+    deletedObjects.push({
       ...fileResult,
       id: object.id,
       rawBytes: object.raw_bytes,
       reason: object.reason,
-    };
-  });
+    });
+  };
+
+  for (const object of orphanedObjects) {
+    removeObject(object);
+  }
+
+  const retainedFailedObjectIds = new Set(
+    deletedObjects
+      .filter(({ fileStatus }) => fileStatus === "failed")
+      .map(({ id }) => id),
+  );
+  for (const { reference } of expiredReferences) {
+    if (
+      removedExpiredReferenceIds.includes(reference.id) ||
+      retainedFailedObjectIds.has(reference.cold_object_id)
+    ) {
+      continue;
+    }
+    insertItem.run(runId, "reference", reference.id, "expiry", null, null, "not_applicable", null);
+    clearCompressionEvent.run(reference.id);
+    deleteReference.run(reference.id);
+    removedExpiredReferenceIds.push(reference.id);
+  }
+
+  const targetBytes = policy.maxBytes - reserveBytes;
+  for (const object of evictionCandidates) {
+    if (afterBytes <= targetBytes) {
+      break;
+    }
+    removeObject(object);
+  }
+
   const errorCount = deletedObjects.filter(
     ({ fileStatus }) => fileStatus === "failed" || fileStatus === "missing",
   ).length;
   const status = errorCount === 0 ? "completed" : "completed_with_errors";
-  const afterBytes = Number(
-    database.prepare("SELECT COALESCE(SUM(raw_bytes), 0) FROM cold_objects").pluck().get(),
-  );
   const deletedBytes = deletedObjects
     .filter(({ fileStatus }) => fileStatus !== "failed")
     .reduce((total, object) => total + object.rawBytes, 0);
@@ -572,16 +546,35 @@ export const cleanupColdStorage = (
 
   return {
     afterBytes,
-    beforeBytes: plan.beforeBytes,
+    beforeBytes,
     completedAt,
     deletedBytes,
     deletedObjects,
     errorCount,
-    expiredReferenceIds: plan.expiredReferenceIds,
+    expiredReferenceIds: removedExpiredReferenceIds,
     runId,
     startedAt,
     status,
   };
+};
+
+// Remove expired and over-limit data in stable order and persist an audit for every decision.
+export const cleanupColdStorage = (
+  database: BetterSqlite3.Database,
+  paths: StoragePaths,
+  policy: ColdStoragePolicy = DEFAULT_COLD_STORAGE_POLICY,
+  options: ColdStorageCleanupOptions = {},
+): ColdStorageCleanupResult => {
+  validatePolicy(policy);
+  const reserveBytes = options.reserveBytes ?? 0;
+  assertNonNegativeInteger(reserveBytes, "Cold storage reserveBytes");
+  if (reserveBytes > policy.maxBytes) {
+    throw new Error("Reserved bytes exceed the configured cold storage limit.");
+  }
+  const startedAt = normalizeDate(options.now ?? new Date(), "Cold storage cleanup time");
+  return database
+    .transaction(() => executeCleanup(database, paths, policy, startedAt, reserveBytes))
+    .immediate();
 };
 
 // Read canonical bytes only after checking expiry, metadata identity, size, and content hash.
@@ -687,36 +680,18 @@ export const storeColdObject = (
   const contentHash = hashContent(contentBytes);
   const identity = identityForHash(paths, contentHash);
   const referenceId = metadata.referenceId ?? randomUUID();
-  const objectExists =
-    database.prepare("SELECT 1 FROM cold_objects WHERE id = ?").pluck().get(identity.id) !==
-    undefined;
-
-  const initialCleanup = cleanupColdStorage(database, paths, policy, {
-    now: nowDate,
-    reserveBytes: objectExists ? 0 : contentBytes.byteLength,
-  });
-  if (initialCleanup.status === "completed_with_errors") {
-    throw new Error(
-      `Cold storage cleanup ${initialCleanup.runId} could not remove every payload file.`,
-    );
-  }
-  const objectExistsAfterCleanup =
-    database.prepare("SELECT 1 FROM cold_objects WHERE id = ?").pluck().get(identity.id) !==
-    undefined;
-  if (objectExists && !objectExistsAfterCleanup) {
-    const reservationCleanup = cleanupColdStorage(database, paths, policy, {
-      now: nowDate,
-      reserveBytes: contentBytes.byteLength,
-    });
-    if (reservationCleanup.status === "completed_with_errors") {
-      throw new Error(
-        `Cold storage cleanup ${reservationCleanup.runId} could not remove every payload file.`,
-      );
-    }
-  }
-
-  const published = writeColdPayload(identity.filePath, contentBytes, contentHash);
+  let published = false;
   const recordMetadata = database.transaction(() => {
+    if (
+      database.prepare("SELECT 1 FROM cold_object_references WHERE id = ?").pluck().get(referenceId) !==
+      undefined
+    ) {
+      throw new Error(`Cold object reference ${referenceId} already exists.`);
+    }
+    const objectExists =
+      database.prepare("SELECT 1 FROM cold_objects WHERE id = ?").pluck().get(identity.id) !==
+      undefined;
+    published = writeColdPayload(identity.filePath, contentBytes, contentHash);
     database
       .prepare(
         `INSERT INTO cold_objects (id, content_hash, relative_path, raw_bytes, created_at)
@@ -759,10 +734,38 @@ export const storeColdObject = (
         createdAt,
         expiresAt,
       );
+
+    const cleanup = executeCleanup(database, paths, policy, now, 0, identity.id);
+    if (cleanup.afterBytes <= policy.maxBytes) {
+      return undefined;
+    }
+
+    database.prepare("DELETE FROM cold_object_references WHERE id = ?").run(referenceId);
+    if (!objectExists) {
+      const fileResult = deleteColdPayload(paths, {
+        content_hash: contentHash,
+        created_at: createdAt,
+        id: identity.id,
+        raw_bytes: contentBytes.byteLength,
+        reason: "orphan",
+        relative_path: identity.relativePath,
+      });
+      if (fileResult.fileStatus !== "failed") {
+        database.prepare("DELETE FROM cold_objects WHERE id = ?").run(identity.id);
+      }
+    }
+    const rejectedAfterBytes = Number(
+      database.prepare("SELECT COALESCE(SUM(raw_bytes), 0) FROM cold_objects").pluck().get(),
+    );
+    database
+      .prepare("UPDATE cold_storage_cleanup_runs SET after_bytes = ? WHERE id = ?")
+      .run(rejectedAfterBytes, cleanup.runId);
+    return cleanup.runId;
   });
 
+  let capacityCleanupRunId: string | undefined;
   try {
-    recordMetadata.immediate();
+    capacityCleanupRunId = recordMetadata.immediate();
   } catch (error) {
     const recorded =
       database.prepare("SELECT 1 FROM cold_objects WHERE id = ?").pluck().get(identity.id) !==
@@ -771,6 +774,11 @@ export const storeColdObject = (
       unlinkSync(identity.filePath);
     }
     throw error;
+  }
+  if (capacityCleanupRunId !== undefined) {
+    throw new Error(
+      `Cold storage cleanup ${capacityCleanupRunId} could not enforce the configured storage limit.`,
+    );
   }
 
   return {
