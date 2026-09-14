@@ -296,7 +296,6 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
   assert.equal(first.details.environment.HTTP_PROXY, "http://127.0.0.1:43117");
   assert.equal(first.details.environment.https_proxy, "http://127.0.0.1:43117");
   assert.equal(first.details.environment.http_proxy, "http://127.0.0.1:43117");
-  assert.equal(first.details.environment.SZAL_LLMTRIM_PROXY_URL, "http://127.0.0.1:43117");
   assert.equal(first.details.environment.NODE_EXTRA_CA_CERTS, "/var/lib/llmtrim/ca.pem");
   assert.match(first.details.environment.NO_PROXY, /lower\.internal/);
   assert.match(first.details.environment.NO_PROXY, /upper\.internal/);
@@ -373,6 +372,7 @@ test("running daemon settings are restarted only when configuration changes", as
     context({
       ...third.details.environment,
       LLMTRIM_UPSTREAM_PROXY: "http://replacement-proxy.test:8080",
+      no_proxy: "latest.internal",
     }),
     {
       enableRecovery: false,
@@ -381,6 +381,12 @@ test("running daemon settings are restarted only when configuration changes", as
       preset: "safe",
     },
   );
+  const off = await recreatedAdapter.configure(context(fourth.details.environment), {
+    enableRecovery: false,
+    host: "claude",
+    mode: "off",
+    preset: "safe",
+  });
 
   const startCalls = calls.filter(({ arguments: arguments_ }) => arguments_[0] === "start");
   assert.equal(first.status, "succeeded");
@@ -401,6 +407,14 @@ test("running daemon settings are restarted only when configuration changes", as
     startCalls[2].environment.LLMTRIM_UPSTREAM_PROXY,
     "http://replacement-proxy.test:8080",
   );
+  assert.deepEqual(off.details.environment, {
+    HTTPS_PROXY: "http://replacement-proxy.test:8080",
+    HTTP_PROXY: "http://replacement-proxy.test:8080",
+    LLMTRIM_UPSTREAM_PROXY: "http://replacement-proxy.test:8080",
+    http_proxy: "http://replacement-proxy.test:8080",
+    https_proxy: "http://replacement-proxy.test:8080",
+    no_proxy: "latest.internal",
+  });
 });
 
 test("OFF mode restores the upstream proxy and records byte-identical pass-through", async () => {
@@ -461,12 +475,18 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
     }),
     { enableRecovery: false, host: "claude", mode: "off", preset: "auto" },
   );
+  const officialOffWithoutCa = await officialAdapter.configure(
+    context({
+      HTTPS_PROXY: "http://127.0.0.1:43117",
+      HTTP_PROXY: "http://127.0.0.1:43117",
+    }),
+    { enableRecovery: false, host: "claude", mode: "off", preset: "auto" },
+  );
   const unverifiedOff = await createLlmtrimAdapter({
     runCommand: async () => commandResult("", 1),
   }).configure(
     context({
       HTTPS_PROXY: "http://127.0.0.1:43117",
-      NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
     }),
     { enableRecovery: false, host: "claude", mode: "off", preset: "auto" },
   );
@@ -519,6 +539,8 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
   assert.equal("HTTPS_PROXY" in officialOff.details.environment, false);
   assert.equal("HTTP_PROXY" in officialOff.details.environment, false);
   assert.equal("NODE_EXTRA_CA_CERTS" in officialOff.details.environment, false);
+  assert.equal(officialOffWithoutCa.status, "succeeded");
+  assert.deepEqual(officialOffWithoutCa.details.environment, {});
   assert.equal(unverifiedOff.status, "failed");
   assert.equal(unverifiedOff.issue.code, "llmtrim-off-proxy-unverified");
   assert.equal(localProxy.changed, false);
@@ -563,7 +585,6 @@ test("unhealthy startup never reports successful compression", async () => {
       HTTP_PROXY: "http://127.0.0.1:43117",
       LLMTRIM_PRESET: "auto",
       NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
-      SZAL_LLMTRIM_PROXY_URL: "http://127.0.0.1:43117",
       http_proxy: "http://127.0.0.1:43117",
       https_proxy: "http://127.0.0.1:43117",
     }),

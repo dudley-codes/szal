@@ -21,7 +21,6 @@ const LLMTRIM_PACKAGE = "@llmtrim/cli@latest";
 const CLAUDE_API_HOST = "api.anthropic.com";
 const SZAL_LLMTRIM_DAEMON_CONFIGURATION = "SZAL_LLMTRIM_DAEMON_CONFIGURATION";
 const SZAL_LLMTRIM_ENVIRONMENT_STATE = "SZAL_LLMTRIM_ENVIRONMENT_STATE";
-const SZAL_LLMTRIM_PROXY_URL = "SZAL_LLMTRIM_PROXY_URL";
 const MINIMUM_RECOVERY_VERSION = [0, 12, 0] as const;
 const COMMAND_TIMEOUT_MS = 10_000;
 const DAEMON_COMMAND_TIMEOUT_MS = 20_000;
@@ -212,8 +211,9 @@ export interface CreateLlmtrimAdapterOptions {
 type ManagedEnvironmentKey = (typeof MANAGED_ENVIRONMENT_KEYS)[number];
 
 interface LlmtrimEnvironmentState {
+  applied: Partial<Record<ManagedEnvironmentKey, string>>;
   values: Partial<Record<ManagedEnvironmentKey, string>>;
-  version: 1;
+  version: 2;
 }
 
 interface LlmtrimDaemonConfiguration {
@@ -417,6 +417,25 @@ const environmentEquals = (
   );
 };
 
+const parseManagedEnvironment = (
+  value: unknown,
+): Partial<Record<ManagedEnvironmentKey, string>> | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const environment: Partial<Record<ManagedEnvironmentKey, string>> = {};
+  for (const key of MANAGED_ENVIRONMENT_KEYS) {
+    const entry = value[key];
+    if (entry !== undefined && typeof entry !== "string") {
+      return undefined;
+    }
+    if (typeof entry === "string") {
+      environment[key] = entry;
+    }
+  }
+  return environment;
+};
+
 const parseEnvironmentState = (value: string | undefined): LlmtrimEnvironmentState | undefined => {
   if (value === undefined) {
     return undefined;
@@ -427,20 +446,15 @@ const parseEnvironmentState = (value: string | undefined): LlmtrimEnvironmentSta
   } catch {
     return undefined;
   }
-  if (!isRecord(document) || document.version !== 1 || !isRecord(document.values)) {
+  if (!isRecord(document) || document.version !== 2) {
     return undefined;
   }
-  const values: Partial<Record<ManagedEnvironmentKey, string>> = {};
-  for (const key of MANAGED_ENVIRONMENT_KEYS) {
-    const entry = document.values[key];
-    if (entry !== undefined && typeof entry !== "string") {
-      return undefined;
-    }
-    if (typeof entry === "string") {
-      values[key] = entry;
-    }
+  const applied = parseManagedEnvironment(document.applied);
+  const values = parseManagedEnvironment(document.values);
+  if (applied === undefined || values === undefined) {
+    return undefined;
   }
-  return { values, version: 1 };
+  return { applied, values, version: 2 };
 };
 
 const parseDaemonConfiguration = (
@@ -540,43 +554,75 @@ const contextRoutesToPort = (context: AdapterContext, port: number): boolean => 
   );
 };
 
-const isLlmtrimProxy = (
-  context: AdapterContext,
-  value: string | undefined,
-  knownProxyUrl?: string,
-): boolean =>
-  value !== undefined &&
-  (value === knownProxyUrl || value === context.environment[SZAL_LLMTRIM_PROXY_URL]);
+const isLlmtrimProxy = (value: string | undefined, knownProxyUrl?: string): boolean =>
+  value !== undefined && value === knownProxyUrl;
 
 const looksLikeOfficialLlmtrimProxy = (value: string | undefined): boolean =>
   value !== undefined && /^http:\/\/127\.0\.0\.1:\d+$/u.test(value);
 
 const hasSuspectedLlmtrimProxy = (context: AdapterContext): boolean =>
-  context.environment.NODE_EXTRA_CA_CERTS === caPath(context) &&
   PROXY_ENVIRONMENT_KEYS.some((key) => looksLikeOfficialLlmtrimProxy(context.environment[key]));
 
 const upstreamProxy = (context: AdapterContext, knownProxyUrl?: string): string | undefined => {
   const proxy = effectiveProxy(context.environment);
-  return proxy !== undefined && !isLlmtrimProxy(context, proxy, knownProxyUrl)
+  return proxy !== undefined && !isLlmtrimProxy(proxy, knownProxyUrl)
     ? proxy
     : context.environment.LLMTRIM_UPSTREAM_PROXY;
 };
 
-const captureEnvironmentState = (context: AdapterContext, knownProxyUrl?: string): string => {
-  const existing = context.environment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
-  if (existing !== undefined) {
-    return existing;
-  }
+const managedEnvironment = (
+  environment: Readonly<Record<string, string | undefined>>,
+): Partial<Record<ManagedEnvironmentKey, string>> => {
   const values: Partial<Record<ManagedEnvironmentKey, string>> = {};
-  let ownedProxy = false;
   for (const key of MANAGED_ENVIRONMENT_KEYS) {
-    const value = context.environment[key];
+    const value = environment[key];
     if (value !== undefined) {
       values[key] = value;
     }
   }
+  return values;
+};
+
+const captureEnvironmentState = (
+  context: AdapterContext,
+  knownProxyUrl?: string,
+): Partial<Record<ManagedEnvironmentKey, string>> => {
+  const current = managedEnvironment(context.environment);
+  const existing = parseEnvironmentState(context.environment[SZAL_LLMTRIM_ENVIRONMENT_STATE]);
+  if (existing !== undefined) {
+    const values = { ...existing.values };
+    const upstreamChanged =
+      current.LLMTRIM_UPSTREAM_PROXY !== existing.applied.LLMTRIM_UPSTREAM_PROXY;
+    if (upstreamChanged) {
+      for (const key of PROXY_ENVIRONMENT_KEYS) {
+        if (current[key] !== existing.applied[key]) {
+          continue;
+        }
+        const upstream = current.LLMTRIM_UPSTREAM_PROXY;
+        if (upstream === undefined) {
+          delete values[key];
+        } else {
+          values[key] = upstream;
+        }
+      }
+    }
+    for (const key of MANAGED_ENVIRONMENT_KEYS) {
+      if (current[key] === existing.applied[key]) {
+        continue;
+      }
+      const value = current[key];
+      if (value === undefined) {
+        delete values[key];
+      } else {
+        values[key] = value;
+      }
+    }
+    return values;
+  }
+  const values = { ...current };
+  let ownedProxy = false;
   for (const key of PROXY_ENVIRONMENT_KEYS) {
-    if (!isLlmtrimProxy(context, values[key], knownProxyUrl)) {
+    if (!isLlmtrimProxy(values[key], knownProxyUrl)) {
       continue;
     }
     ownedProxy = true;
@@ -590,7 +636,7 @@ const captureEnvironmentState = (context: AdapterContext, knownProxyUrl?: string
   if (ownedProxy && values.NODE_EXTRA_CA_CERTS === caPath(context)) {
     delete values.NODE_EXTRA_CA_CERTS;
   }
-  return JSON.stringify({ values, version: 1 } satisfies LlmtrimEnvironmentState);
+  return values;
 };
 
 // Build the environment for a new Claude process while retaining a previous proxy as upstream.
@@ -602,7 +648,7 @@ const enabledEnvironment = (
   daemonPid?: number,
 ): Record<string, string> => {
   const environment = definedEnvironment(context.environment);
-  environment[SZAL_LLMTRIM_ENVIRONMENT_STATE] = captureEnvironmentState(context, knownProxyUrl);
+  const originalEnvironment = captureEnvironmentState(context, knownProxyUrl);
   const upstream = upstreamProxy(context, knownProxyUrl);
   if (upstream === undefined) {
     delete environment.LLMTRIM_UPSTREAM_PROXY;
@@ -619,11 +665,6 @@ const enabledEnvironment = (
   environment.NODE_USE_ENV_PROXY = "1";
   environment.LLMTRIM_PRESET = request.preset;
   environment.LLMTRIM_FIRST_ARRIVAL_RECALL = String(request.enableRecovery);
-  if (proxyUrl.length === 0) {
-    delete environment[SZAL_LLMTRIM_PROXY_URL];
-  } else {
-    environment[SZAL_LLMTRIM_PROXY_URL] = proxyUrl;
-  }
   if (daemonPid === undefined) {
     delete environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
   } else {
@@ -635,6 +676,11 @@ const enabledEnvironment = (
       version: 1,
     } satisfies LlmtrimDaemonConfiguration);
   }
+  environment[SZAL_LLMTRIM_ENVIRONMENT_STATE] = JSON.stringify({
+    applied: managedEnvironment(environment),
+    values: originalEnvironment,
+    version: 2,
+  } satisfies LlmtrimEnvironmentState);
   return environment;
 };
 
@@ -656,13 +702,12 @@ const passThroughEnvironment = (
     }
     delete environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
     delete environment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
-    delete environment[SZAL_LLMTRIM_PROXY_URL];
     return environment;
   }
   const upstream = environment.LLMTRIM_UPSTREAM_PROXY;
   let ownedProxy = false;
   for (const key of PROXY_ENVIRONMENT_KEYS) {
-    if (!isLlmtrimProxy(context, environment[key], knownProxyUrl)) {
+    if (!isLlmtrimProxy(environment[key], knownProxyUrl)) {
       continue;
     }
     ownedProxy = true;
@@ -681,7 +726,6 @@ const passThroughEnvironment = (
   }
   delete environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
   delete environment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
-  delete environment[SZAL_LLMTRIM_PROXY_URL];
   return environment;
 };
 
@@ -1049,12 +1093,8 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
       };
     }
     if (request.mode === "off") {
-      let knownProxyUrl = context.environment[SZAL_LLMTRIM_PROXY_URL];
-      if (
-        encodedState === undefined &&
-        knownProxyUrl === undefined &&
-        hasSuspectedLlmtrimProxy(context)
-      ) {
+      let knownProxyUrl: string | undefined;
+      if (encodedState === undefined && hasSuspectedLlmtrimProxy(context)) {
         const probe = await readStatus(context);
         if (
           probe.status === "unavailable" ||
@@ -1146,7 +1186,6 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
       delete startEnvironment.NODE_EXTRA_CA_CERTS;
       delete startEnvironment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
       delete startEnvironment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
-      delete startEnvironment[SZAL_LLMTRIM_PROXY_URL];
       const start = await invoke(
         context,
         LLMTRIM_COMMAND,
