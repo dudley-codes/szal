@@ -8,6 +8,7 @@ import test from "node:test";
 import { parseArguments } from "../dist/cli/parse-arguments.js";
 import { runCli } from "../dist/cli/run-cli.js";
 
+// Capture injected command I/O for focused dispatch tests without spawning a process.
 const captureCli = (arguments_) => {
   const stdout = [];
   const stderr = [];
@@ -22,6 +23,13 @@ const captureCli = (arguments_) => {
 
   return { exitCode, stderr, stdout };
 };
+
+// Execute the compiled binary to verify the same interface users invoke after installation.
+const runExecutable = (arguments_, cwd = process.cwd()) =>
+  spawnSync(process.execPath, [resolve("dist/cli.js"), ...arguments_], {
+    cwd,
+    encoding: "utf8",
+  });
 
 test("help aliases resolve to one command", () => {
   for (const alias of ["help", "--help", "-h"]) {
@@ -60,6 +68,35 @@ test("unknown commands fail with a help hint", () => {
   assert.match(result.stderr.join("\n"), /szal help/);
 });
 
+test("the executable exposes equivalent help aliases", () => {
+  for (const arguments_ of [[], ["help"], ["--help"], ["-h"]]) {
+    const result = runExecutable(arguments_);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Szal 0\.1\.0/);
+    assert.match(result.stdout, /Usage:/);
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("the executable exposes equivalent version aliases", () => {
+  for (const alias of ["version", "--version", "-v"]) {
+    const result = runExecutable([alias]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "0.1.0\n");
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("the executable returns a non-zero status for unknown commands", () => {
+  const result = runExecutable(["install"]);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Unknown command: install/);
+});
+
 test("the executable does not modify the current project", () => {
   const projectDirectory = mkdtempSync(join(tmpdir(), "szal-project-"));
   const markerPath = join(projectDirectory, "source.txt");
@@ -68,10 +105,7 @@ test("the executable does not modify the current project", () => {
   const beforeContents = readFileSync(markerPath, "utf8");
 
   try {
-    const result = spawnSync(process.execPath, [resolve("dist/cli.js"), "help"], {
-      cwd: projectDirectory,
-      encoding: "utf8",
-    });
+    const result = runExecutable(["help"], projectDirectory);
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Usage:/);
