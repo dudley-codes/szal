@@ -55,6 +55,12 @@ If `XDG_DATA_HOME` is unset or relative, Szal uses `~/.local/share/szal/`.
 
 The SQLite database uses foreign-key enforcement, write-ahead logging, a five-second busy timeout, and transactional migrations. Applied migrations are checksummed and cannot be silently rewritten. Cold payloads are written as private, content-addressed files before their metadata is committed to SQLite.
 
+Cold objects use stable `szal://cold/sha256/<hash>` identifiers. Identical payloads share one
+immutable file while retaining separate session, project, category, token, compressor, source, and
+expiry references. Reads verify the stored path, byte count, and hash before returning exact bytes.
+Cleanup applies the configured retention and size limits in a stable oldest-first order, records
+every expired reference and removed object in SQLite, and retains failed deletions for later retry.
+
 After linking, the currently implemented commands are:
 
 ```bash

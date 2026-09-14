@@ -9,6 +9,7 @@ import BetterSqlite3 from "better-sqlite3";
 
 import {
   applyMigrations,
+  MIGRATIONS,
   openSzalDatabase,
   resolveStoragePaths,
   storeColdObject,
@@ -19,6 +20,8 @@ const EXPECTED_TABLES = [
   "benchmarks",
   "cold_object_references",
   "cold_objects",
+  "cold_storage_cleanup_items",
+  "cold_storage_cleanup_runs",
   "compression_events",
   "decisions",
   "installations",
@@ -105,11 +108,45 @@ test("reopening a database is idempotent and preserves data", () => {
     );
     assert.equal(
       reopenedDatabase.connection.prepare("SELECT COUNT(*) FROM schema_migrations").pluck().get(),
-      1,
+      MIGRATIONS.length,
     );
   } finally {
     reopenedDatabase.connection.close();
     rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
+
+test("cold-storage audit migration upgrades the initial schema without losing metadata", () => {
+  const database = new BetterSqlite3(":memory:");
+  const initialMigration = MIGRATIONS[0];
+  assert.notEqual(initialMigration, undefined);
+
+  try {
+    applyMigrations(database, [initialMigration]);
+    database
+      .prepare(
+        "INSERT INTO cold_objects (id, content_hash, relative_path, raw_bytes) VALUES (?, ?, ?, ?)",
+      )
+      .run("object-1", "hash-1", "sha256/ha/hash-1", 7);
+
+    applyMigrations(database);
+
+    assert.equal(database.prepare("SELECT COUNT(*) FROM cold_objects").pluck().get(), 1);
+    assert.equal(
+      database
+        .prepare(
+          "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cold_storage_cleanup_runs'",
+        )
+        .pluck()
+        .get(),
+      1,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) FROM schema_migrations").pluck().get(),
+      MIGRATIONS.length,
+    );
+  } finally {
+    database.close();
   }
 });
 

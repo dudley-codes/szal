@@ -1,4 +1,22 @@
-export { storeColdObject, type ColdObjectMetadata, type StoredColdObject } from "./cold-objects.js";
+export {
+  cleanupColdStorage,
+  coldStoragePolicyFromConfig,
+  DEFAULT_COLD_STORAGE_POLICY,
+  readColdObject,
+  storeColdObject,
+  type ColdObjectCorruptionReason,
+  type ColdObjectMetadata,
+  type ColdObjectReadResult,
+  type ColdStorageCleanupOptions,
+  type ColdStorageCleanupResult,
+  type ColdStorageDeletionReason,
+  type ColdStorageFileStatus,
+  type ColdStoragePolicy,
+  type DeletedColdObject,
+  type ReadColdObjectOptions,
+  type StoreColdObjectOptions,
+  type StoredColdObject,
+} from "./cold-objects.js";
 export { openSzalDatabase, type OpenDatabaseOptions, type SzalDatabase } from "./database.js";
 export {
   aggregateTokenUsage,
