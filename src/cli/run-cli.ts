@@ -1,5 +1,7 @@
 import { runHelp } from "./commands/help.js";
-import type { CommandHandler } from "./commands/types.js";
+import { runOff, runOn } from "./commands/terminal-state.js";
+import { runStatus } from "./commands/status.js";
+import type { CliComponentStatus, CommandHandler } from "./commands/types.js";
 import { runVersion } from "./commands/version.js";
 import { parseArguments, type CliCommandName } from "./parse-arguments.js";
 
@@ -9,11 +11,18 @@ export interface CliIo {
 }
 
 export interface CliOptions {
+  agent?: CliComponentStatus;
+  engine?: CliComponentStatus;
+  environment?: Readonly<Record<string, string | undefined>>;
+  projectDirectory?: string;
   version: string;
 }
 
 const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   help: runHelp,
+  off: runOff,
+  on: runOn,
+  status: runStatus,
   version: runVersion,
 };
 
@@ -26,7 +35,7 @@ const DEFAULT_IO: CliIo = {
   },
 };
 
-// Dispatch parsed commands through injected I/O so behavior stays testable and embeddable.
+// Dispatch parsed commands through injected state and I/O so terminal isolation is testable.
 export const runCli = (
   arguments_: readonly string[],
   options: CliOptions,
@@ -41,7 +50,15 @@ export const runCli = (
   }
 
   return COMMAND_HANDLERS[parsedArguments.command]({
+    ...(options.agent === undefined ? {} : { agent: options.agent }),
+    arguments_: parsedArguments.arguments_ ?? [],
+    ...(options.engine === undefined ? {} : { engine: options.engine }),
+    environment: options.environment ?? process.env,
+    projectDirectory: options.projectDirectory ?? process.cwd(),
+    stderr: io.stderr,
     stdout: io.stdout,
     version: options.version,
   });
 };
+
+export type { CliComponentStatus } from "./commands/types.js";

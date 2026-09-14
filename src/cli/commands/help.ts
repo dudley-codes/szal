@@ -9,11 +9,16 @@ Usage:
   szal [command]
 
 Commands:
+  on         Enable compression in this terminal
+  off        Use pass-through compression in this terminal
+  status     Show terminal, project, agent, engine, and telemetry state
   help       Show command help
   version    Show the installed version
 
 Options:
-  -h, --help       Show command help
-  -v, --version    Show the installed version`);
+  -on, --on         Alias for on
+  -off, --off       Alias for off
+  -h, --help        Show command help
+  -v, --version     Show the installed version`);
   return 0;
 };
