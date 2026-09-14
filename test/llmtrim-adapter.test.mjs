@@ -115,6 +115,36 @@ test("a missing llmtrim binary leaves pass-through measurement available", async
   );
 });
 
+test("NO_PROXY conflicts prevent active Claude compression", async () => {
+  const calls = [];
+  const adapter = createLlmtrimAdapter({
+    runCommand: async (invocation) => {
+      calls.push(invocation);
+      return commandResult(JSON.stringify(HEALTHY_STATUS));
+    },
+  });
+  const routedEnvironment = {
+    HTTPS_PROXY: "http://127.0.0.1:43117",
+    HTTP_PROXY: "http://127.0.0.1:43117",
+    NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+    http_proxy: "http://127.0.0.1:43117",
+    https_proxy: "http://127.0.0.1:43117",
+  };
+
+  const health = await adapter.health(context({ ...routedEnvironment, NO_PROXY: "*" }));
+  const configuration = await adapter.configure(
+    context({ ...routedEnvironment, no_proxy: "api.anthropic.com" }),
+    { enableRecovery: true, host: "claude", mode: "on", preset: "auto" },
+  );
+
+  assert.equal(health.status, "degraded");
+  assert.equal(health.issues[0].code, "llmtrim-no-proxy-conflict");
+  assert.equal(configuration.status, "failed");
+  assert.equal(configuration.changed, false);
+  assert.equal(configuration.issue.code, "llmtrim-no-proxy-conflict");
+  assert.equal(calls.filter(({ arguments: arguments_ }) => arguments_[0] === "start").length, 0);
+});
+
 test("recovery remains unavailable before llmtrim 0.12.0", async () => {
   let pid = 42;
   const oldStatus = () => ({
@@ -274,7 +304,7 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
   assert.equal(first.details.environment.no_proxy, first.details.environment.NO_PROXY);
 
   const startCall = calls.find(({ arguments: arguments_ }) => arguments_[0] === "start");
-  assert.deepEqual(startCall.arguments, ["start"]);
+  assert.deepEqual(startCall.arguments, ["start", "--force"]);
   assert.equal(startCall.environment.LLMTRIM_UPSTREAM_PROXY, "http://127.0.0.1:7890");
   assert.equal(startCall.environment.LLMTRIM_FIRST_ARRIVAL_RECALL, "true");
   assert.equal(startCall.environment.LLMTRIM_PRESET, "auto");
@@ -584,6 +614,54 @@ test("failed force restart reports conservative mutation metadata", async () => 
   assert.equal(startCall.timeoutMs, 20_000);
 });
 
+test("disable stops a daemon without relying on version detection", async () => {
+  let running = true;
+  const calls = [];
+  const adapter = createLlmtrimAdapter({
+    runCommand: async (invocation) => {
+      calls.push(invocation);
+      if (invocation.arguments[0] === "stop") {
+        running = false;
+        return commandResult("Interceptor stopped\n");
+      }
+      if (invocation.arguments[0] === "--version") {
+        return commandResult("invalid version output");
+      }
+      return commandResult(
+        JSON.stringify({
+          ...HEALTHY_STATUS,
+          daemon: {
+            ...HEALTHY_STATUS.daemon,
+            health: running ? "healthy" : "stopped",
+            pid: running ? 42 : null,
+            port: running ? 43117 : null,
+            port_accepting: running,
+            running,
+            version: running ? "0.13.4" : null,
+          },
+        }),
+      );
+    },
+  });
+  const result = await adapter.disable(
+    context({
+      HTTPS_PROXY: "http://127.0.0.1:43117",
+      HTTP_PROXY: "http://127.0.0.1:43117",
+      NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+      http_proxy: "http://127.0.0.1:43117",
+      https_proxy: "http://127.0.0.1:43117",
+    }),
+  );
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.changed, true);
+  assert.equal(calls.filter(({ arguments: arguments_ }) => arguments_[0] === "stop").length, 1);
+  assert.equal(
+    calls.some(({ arguments: arguments_ }) => arguments_[0] === "--version"),
+    false,
+  );
+});
+
 test("telemetry snapshots, deltas, and recall references are ledger-ready", async () => {
   const before = {
     approximate: false,
@@ -618,8 +696,8 @@ test("telemetry snapshots, deltas, and recall references are ledger-ready", asyn
     },
     status: "available",
   });
-  assert.deepEqual(diffLlmtrimTelemetry(before, after, "on"), {
-    approximate: false,
+  assert.deepEqual(diffLlmtrimTelemetry(before, after), {
+    approximate: true,
     compressed: true,
     inputTokensAfter: 250,
     inputTokensBefore: 400,

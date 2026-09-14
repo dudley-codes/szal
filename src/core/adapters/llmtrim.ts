@@ -18,6 +18,7 @@ import {
 
 const LLMTRIM_COMMAND = "llmtrim";
 const LLMTRIM_PACKAGE = "@llmtrim/cli@latest";
+const CLAUDE_API_HOST = "api.anthropic.com";
 const SZAL_LLMTRIM_DAEMON_CONFIGURATION = "SZAL_LLMTRIM_DAEMON_CONFIGURATION";
 const SZAL_LLMTRIM_ENVIRONMENT_STATE = "SZAL_LLMTRIM_ENVIRONMENT_STATE";
 const SZAL_LLMTRIM_PROXY_URL = "SZAL_LLMTRIM_PROXY_URL";
@@ -60,6 +61,13 @@ const DAEMON_STOPPED_ISSUE: AdapterIssue = {
   message: "The llmtrim interceptor is installed but not running.",
   remediation: "Run llmtrim start or configure the llmtrim adapter for an enabled transport.",
   retryable: true,
+};
+
+const CLAUDE_NO_PROXY_ISSUE: AdapterIssue = {
+  code: "llmtrim-no-proxy-conflict",
+  message: "The Claude API is excluded from proxy routing by NO_PROXY.",
+  remediation: "Remove the Claude API or wildcard entry from NO_PROXY and retry configuration.",
+  retryable: false,
 };
 
 const recoveryUnsupportedIssue = (version: string): AdapterIssue => ({
@@ -484,6 +492,32 @@ const mergeNoProxy = (...values: readonly (string | undefined)[]): string => {
   return [...entries].join(",");
 };
 
+const noProxyBypassesClaude = (
+  environment: Readonly<Record<string, string | undefined>>,
+): boolean =>
+  [environment.no_proxy, environment.NO_PROXY]
+    .filter((value): value is string => value !== undefined)
+    .flatMap((value) => value.split(","))
+    .some((entry) => {
+      const normalized = entry.trim().toLowerCase();
+      if (normalized === "*") {
+        return true;
+      }
+      const portSeparator = normalized.lastIndexOf(":");
+      const hasPort = portSeparator > -1 && /^\d+$/u.test(normalized.slice(portSeparator + 1));
+      if (hasPort && normalized.slice(portSeparator + 1) !== "443") {
+        return false;
+      }
+      const pattern = hasPort ? normalized.slice(0, portSeparator) : normalized;
+      if (pattern.startsWith("*.")) {
+        return CLAUDE_API_HOST.endsWith(pattern.slice(1));
+      }
+      if (pattern.startsWith(".")) {
+        return CLAUDE_API_HOST.endsWith(pattern);
+      }
+      return pattern === CLAUDE_API_HOST;
+    });
+
 const caPath = (context: AdapterContext): string =>
   join(context.environment.LLMTRIM_HOME ?? join(context.homeDirectory, ".llmtrim"), "ca.pem");
 
@@ -669,11 +703,10 @@ const healthDetails = (status?: ParsedLlmtrimStatus): LlmtrimHealthDetails => ({
   running: status?.daemon.running ?? false,
 });
 
-// Translate llmtrim's cumulative counters into a ledger event without inferring concurrency away.
+// Translate llmtrim's daemon-wide cumulative counters into an approximate ledger event.
 export const diffLlmtrimTelemetry = (
   before: LlmtrimTelemetrySnapshot,
   after: LlmtrimTelemetrySnapshot,
-  mode: "off" | "on",
 ): LlmtrimCompressionMeasurement | undefined => {
   const requestCount = after.requests - before.requests;
   const inputTokensBefore = after.inputTokensBefore - before.inputTokensBefore;
@@ -682,11 +715,11 @@ export const diffLlmtrimTelemetry = (
     return undefined;
   }
   return {
-    approximate: before.approximate || after.approximate || requestCount !== 1,
-    compressed: mode === "on" && inputTokensAfter < inputTokensBefore,
+    approximate: true,
+    compressed: inputTokensAfter < inputTokensBefore,
     inputTokensAfter,
     inputTokensBefore,
-    mode,
+    mode: "on",
     requestCount,
     source: "llmtrim-status",
   };
@@ -818,6 +851,9 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
         ],
         status: "degraded",
       };
+    }
+    if (noProxyBypassesClaude(context.environment)) {
+      return { details, issues: [CLAUDE_NO_PROXY_ISSUE], status: "degraded" };
     }
     if (probe.value.daemon.health !== "healthy") {
       const caPresent = await fileExists(caPath(context));
@@ -1056,6 +1092,14 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
         status: "succeeded",
       };
     }
+    if (noProxyBypassesClaude(context.environment)) {
+      return {
+        changed: false,
+        issue: CLAUDE_NO_PROXY_ISSUE,
+        rolledBack: true,
+        status: "failed",
+      };
+    }
 
     const detection = await detect(context);
     if (detection.status === "unavailable") {
@@ -1103,20 +1147,18 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
       delete startEnvironment[SZAL_LLMTRIM_DAEMON_CONFIGURATION];
       delete startEnvironment[SZAL_LLMTRIM_ENVIRONMENT_STATE];
       delete startEnvironment[SZAL_LLMTRIM_PROXY_URL];
-      const wasRunning = currentHealth.details.running;
-      const startArguments = currentHealth.details.running ? ["start", "--force"] : ["start"];
       const start = await invoke(
         context,
         LLMTRIM_COMMAND,
-        startArguments,
+        ["start", "--force"],
         startEnvironment,
         DAEMON_COMMAND_TIMEOUT_MS,
       );
       if (start.exitCode !== 0) {
         return {
-          changed: wasRunning,
+          changed: true,
           issue: commandFailureIssue("start", start),
-          rolledBack: !wasRunning,
+          rolledBack: false,
           status: "failed",
         };
       }
@@ -1196,12 +1238,11 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
   };
 
   const disable = async (context: AdapterContext): Promise<AdapterOperationResult> => {
-    const detection = await detect(context);
-    if (detection.status === "unavailable") {
-      return { changed: false, requiresRestart: false, status: "succeeded" };
-    }
     const before = await health(context);
-    if (before.status === "unavailable" && !before.details.running) {
+    const wasStopped =
+      !before.details.running &&
+      before.issues.some(({ code }) => code === DAEMON_STOPPED_ISSUE.code);
+    if (wasStopped) {
       return { changed: false, requiresRestart: false, status: "succeeded" };
     }
     const result = await invoke(
@@ -1220,13 +1261,15 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
       };
     }
     const after = await health(context);
-    if (after.details.running) {
+    const stopped =
+      !after.details.running && after.issues.some(({ code }) => code === DAEMON_STOPPED_ISSUE.code);
+    if (!stopped) {
       return {
         changed: true,
         issue: {
           code: "llmtrim-stop-unverified",
-          message: "llmtrim stop completed but the interceptor still reports as running.",
-          remediation: "Run llmtrim doctor and stop the interceptor manually.",
+          message: "llmtrim stop completed but daemon inactivity could not be verified.",
+          remediation: "Run llmtrim status and stop the interceptor manually if it is active.",
           retryable: true,
         },
         rolledBack: false,
