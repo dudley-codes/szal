@@ -1,8 +1,7 @@
 export type CliCommandName = "help" | "version";
 
 export type ParsedArguments =
-  | { command: CliCommandName; kind: "command" }
-  | { input: string; kind: "invalid" };
+  { command: CliCommandName; kind: "command" } | { input: string; kind: "invalid" };
 
 const COMMAND_ALIASES: ReadonlyMap<string, CliCommandName> = new Map([
   ["help", "help"],

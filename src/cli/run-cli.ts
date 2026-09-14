@@ -18,8 +18,12 @@ const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
 };
 
 const DEFAULT_IO: CliIo = {
-  stderr: (message) => console.error(message),
-  stdout: (message) => console.log(message),
+  stderr: (message) => {
+    console.error(message);
+  },
+  stdout: (message) => {
+    console.log(message);
+  },
 };
 
 // Dispatch parsed commands through injected I/O so behavior stays testable and embeddable.
