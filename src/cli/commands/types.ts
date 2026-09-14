@@ -1,4 +1,5 @@
 import type { CapabilityState } from "../../core/terminal/index.js";
+import type { CompressionEngineState } from "../../core/compression/index.js";
 
 export interface CliComponentStatus {
   detail?: string;
@@ -9,6 +10,7 @@ export interface CliComponentStatus {
 export interface CommandContext {
   agent?: CliComponentStatus;
   arguments_: readonly string[];
+  compressionEngines?: readonly CompressionEngineState[];
   engine?: CliComponentStatus;
   environment: Readonly<Record<string, string | undefined>>;
   homeDirectory: string;

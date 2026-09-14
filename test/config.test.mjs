@@ -103,6 +103,17 @@ test("all compression profiles validate and invalid config errors name the field
   );
 });
 
+test("compression ownership is configurable by category and rejects stacked values", () => {
+  const configured = setConfigValue(DEFAULT_CONFIG, "ownership.code", "squeez");
+
+  assert.equal(configured.ownership.code, "squeez");
+  assert.equal(DEFAULT_CONFIG.ownership.code, "auto");
+  assert.throws(
+    () => setConfigValue(DEFAULT_CONFIG, "ownership.code", ["llmtrim", "squeez"]),
+    /ownership\.code.*auto.*raw.*llmtrim.*squeez/i,
+  );
+});
+
 test("model-window overrides require positive integer token counts", () => {
   const configured = setConfigValue(DEFAULT_CONFIG, "modelWindows.claude-opus-4-1", 200_000);
 

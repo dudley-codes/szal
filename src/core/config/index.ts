@@ -9,10 +9,14 @@ export {
   type ConfigStoreOptions,
 } from "./store.js";
 export {
+  COMPRESSION_OWNERS,
   COMPRESSION_PROFILES,
+  CONTENT_CATEGORIES,
   DEFAULT_CONFIG,
   ENGINE_MODES,
+  type CompressionOwnerPreference,
   type CompressionProfile,
+  type ContentCategory,
   type EngineConfig,
   type EngineMode,
   type LoadedConfig,

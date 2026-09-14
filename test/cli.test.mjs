@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -7,6 +15,7 @@ import test from "node:test";
 
 import { parseArguments } from "../dist/cli/parse-arguments.js";
 import { runCli } from "../dist/cli/run-cli.js";
+import { REQUIRED_PRESERVATION_FIELDS } from "../dist/core/compression/index.js";
 
 // Capture injected command I/O for focused dispatch tests without spawning a process.
 const captureCli = (arguments_) => {
@@ -54,6 +63,14 @@ test("shell subcommands retain their arguments for the handler", () => {
   assert.deepEqual(parseArguments(["shell", "install", "zsh", "--terminal-id"]), {
     arguments_: ["install", "zsh", "--terminal-id"],
     command: "shell",
+    kind: "command",
+  });
+});
+
+test("doctor retains its JSON option for the handler", () => {
+  assert.deepEqual(parseArguments(["doctor", "--json"]), {
+    arguments_: ["--json"],
+    command: "doctor",
     kind: "command",
   });
 });
@@ -196,6 +213,118 @@ test("invalid config updates fail without changing the previous file", () => {
     assert.equal(negativeResult.status, 1);
     assert.match(negativeResult.stderr, /retention\.telemetryDays.*non-negative integer/i);
     assert.equal(readFileSync(configPath, "utf8"), beforeBytes);
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
+
+test("doctor reports active ownership by content category without modifying the project", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-doctor-home-"));
+  const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-doctor-project-"));
+  const binDirectory = join(homeDirectory, "bin");
+  const executablePath = join(binDirectory, "squeez");
+  const markerPath = join(projectDirectory, "source.txt");
+  mkdirSync(binDirectory, { recursive: true });
+  writeFileSync(executablePath, "#!/bin/sh\nprintf 'squeez 1.46.0\\n'\n");
+  chmodSync(executablePath, 0o700);
+  writeFileSync(markerPath, "canonical source\n");
+  const beforeFiles = readdirSync(projectDirectory);
+  const environment = {
+    ...process.env,
+    HOME: homeDirectory,
+    PATH: binDirectory,
+    XDG_CONFIG_HOME: join(homeDirectory, "config"),
+  };
+
+  try {
+    const result = runExecutable(["doctor", "--json"], projectDirectory, environment);
+
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.engines.squeez.status, "available");
+    assert.equal(report.engines.squeez.version, "1.46.0");
+    assert.equal(
+      report.ownership.find((assignment) => assignment.category === "code").owner,
+      "squeez",
+    );
+    assert.equal(
+      report.ownership.find((assignment) => assignment.category === "conversation").owner,
+      null,
+    );
+    assert.equal(
+      report.ownership.find((assignment) => assignment.category === "cold-storage").owner,
+      null,
+    );
+    assert.deepEqual(readdirSync(projectDirectory), beforeFiles);
+    assert.equal(readFileSync(markerPath, "utf8"), "canonical source\n");
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+    rmSync(projectDirectory, { force: true, recursive: true });
+  }
+});
+
+test("doctor degrades safely when optional squeez is missing", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-doctor-missing-"));
+  const environment = { HOME: homeDirectory, PATH: "/nonexistent" };
+
+  try {
+    const result = runExecutable(["doctor"], process.cwd(), environment);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /squeez: UNAVAILABLE/);
+    assert.match(result.stdout, /bash: RAW \[degraded\]/);
+    assert.match(result.stdout, /cold-storage: RAW \[raw\]/);
+    assert.match(result.stdout, /Status: DEGRADED/);
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
+
+test("doctor fails closed when two active lossy engines claim one category", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-doctor-conflict-"));
+  const stdout = [];
+  const stderr = [];
+  const bashCapability = {
+    category: "bash",
+    preserves: REQUIRED_PRESERVATION_FIELDS,
+    safety: "lossy-recoverable",
+  };
+
+  try {
+    const exitCode = runCli(
+      ["doctor", "--json"],
+      {
+        compressionEngines: [
+          {
+            activeCategories: ["bash"],
+            available: true,
+            capabilities: [bashCapability],
+            id: "llmtrim",
+          },
+          {
+            activeCategories: ["bash"],
+            available: true,
+            capabilities: [bashCapability],
+            id: "squeez",
+          },
+        ],
+        environment: { PATH: "/nonexistent" },
+        homeDirectory,
+        version: "9.8.7",
+      },
+      {
+        stderr: (message) => stderr.push(message),
+        stdout: (message) => stdout.push(message),
+      },
+    );
+    const report = JSON.parse(stdout.join("\n"));
+    const bash = report.ownership.find((assignment) => assignment.category === "bash");
+
+    assert.equal(exitCode, 1);
+    assert.equal(report.status, "failed");
+    assert.equal(bash.state, "conflict");
+    assert.deepEqual(bash.competingOwners, ["llmtrim", "squeez"]);
+    assert.deepEqual(stderr, []);
   } finally {
     rmSync(homeDirectory, { force: true, recursive: true });
   }

@@ -10,6 +10,10 @@
     "./adapters": {
       "types": "./dist/core/adapters/index.d.ts",
       "import": "./dist/core/adapters/index.js"
+    },
+    "./ownership": {
+      "types": "./dist/core/compression/index.d.ts",
+      "import": "./dist/core/compression/index.js"
     }
   },
   "files": [

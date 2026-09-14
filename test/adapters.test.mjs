@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { availableCapability, degradedCapability, unavailableCapability } from "szal/adapters";
+import {
+  MINIMUM_SAFE_SQUEEZ_VERSION,
+  availableCapability,
+  createSqueezAdapter,
+  degradedCapability,
+  unavailableCapability,
+} from "szal/adapters";
 
 const MISSING_EXECUTABLE = {
   code: "executable-not-found",
@@ -111,4 +120,75 @@ test("an unavailable optional engine does not block an available engine", async 
   assert.equal(missingCapabilities[0].importance, "optional");
   assert.equal(availableCapabilities[0].status, "available");
   assert.equal(availableCapabilities[0].name, "request-compression");
+});
+
+const createSqueezFixture = (version) => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-squeez-"));
+  const binDirectory = join(homeDirectory, "bin");
+  const executablePath = join(binDirectory, "squeez");
+  mkdirSync(join(homeDirectory, ".codex"), { recursive: true });
+  mkdirSync(binDirectory, { recursive: true });
+  writeFileSync(executablePath, `#!/bin/sh\nprintf 'squeez ${version}\\n'\n`);
+  chmodSync(executablePath, 0o700);
+  return { binDirectory, executablePath, homeDirectory };
+};
+
+test("the squeez adapter detects its version, hosts, and safe capability ceiling", async () => {
+  const fixture = createSqueezFixture(MINIMUM_SAFE_SQUEEZ_VERSION);
+  const adapter = createSqueezAdapter();
+  const context = {
+    environment: { PATH: fixture.binDirectory },
+    homeDirectory: fixture.homeDirectory,
+  };
+
+  try {
+    const detection = await adapter.detect(context);
+    const capabilities = await adapter.capabilities(context);
+    const health = await adapter.health(context);
+
+    assert.equal(detection.status, "available");
+    assert.equal(detection.details.executablePath, fixture.executablePath);
+    assert.equal(detection.details.version, MINIMUM_SAFE_SQUEEZ_VERSION);
+    assert.equal(detection.details.ownershipSafe, true);
+    assert.deepEqual(detection.details.detectedHosts, ["codex"]);
+    assert.equal(health.status, "healthy");
+    assert.equal(
+      capabilities.find((capability) => capability.name === "bash-compression").status,
+      "available",
+    );
+    assert.equal(
+      capabilities.find((capability) => capability.name === "conversation-compression").status,
+      "unavailable",
+    );
+    assert.equal(
+      capabilities.find((capability) => capability.name === "response-compression").status,
+      "unavailable",
+    );
+  } finally {
+    rmSync(fixture.homeDirectory, { force: true, recursive: true });
+  }
+});
+
+test("an old squeez version is detected but cannot receive lossy ownership", async () => {
+  const fixture = createSqueezFixture("1.45.9");
+  const adapter = createSqueezAdapter();
+  const context = {
+    environment: { PATH: fixture.binDirectory },
+    homeDirectory: fixture.homeDirectory,
+  };
+
+  try {
+    const detection = await adapter.detect(context);
+    const capabilities = await adapter.capabilities(context);
+    const health = await adapter.health(context);
+    assert.equal(detection.status, "available");
+    assert.equal(detection.details.ownershipSafe, false);
+    assert.equal(health.status, "degraded");
+    assert.equal(
+      capabilities.find((capability) => capability.name === "bash-compression").status,
+      "degraded",
+    );
+  } finally {
+    rmSync(fixture.homeDirectory, { force: true, recursive: true });
+  }
 });
