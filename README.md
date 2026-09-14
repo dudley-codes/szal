@@ -145,3 +145,19 @@ Capability results distinguish `available`, `degraded`, and `unavailable` states
 capability as `required` or `optional`. Limitations use stable issue codes so doctor and other core
 services can consume results without parsing presentation text. A missing optional engine must
 return unavailable results instead of preventing other adapters from being inspected.
+
+### llmtrim engine
+
+The llmtrim adapter uses the upstream CLI's scriptable surfaces: `--version`, `status --json`,
+`start`, and `stop`. Installation uses the official `@llmtrim/cli` npm package and verifies the
+binary afterward. Command execution is shell-free and injectable for tests.
+
+Claude transport configuration returns an environment for the new agent process. Existing proxies
+are retained as `LLMTRIM_UPSTREAM_PROXY`, local-network bypasses are merged with the user's
+`NO_PROXY`, and OFF mode restores the upstream proxy instead of routing through llmtrim. The
+adapter never describes compression as enabled unless the daemon, port, and Claude launch
+environment are healthy together.
+
+`readTelemetry` returns cumulative llmtrim token counters. Snapshot deltas become ledger-ready
+compression measurements, while OFF mode records equal before/after bytes and tokens. Recall
+metadata extraction retains only llmtrim's opaque handles, not the raw tool output.
