@@ -451,16 +451,20 @@ const executeCleanup = (
   const pendingSizeRetryIds = new Set(
     database
       .prepare(
-        `SELECT item.record_id
-           FROM cold_storage_cleanup_items AS item
-           JOIN (
-             SELECT record_id, MAX(id) AS id
-               FROM cold_storage_cleanup_items
-              WHERE item_kind = 'object'
-              GROUP BY record_id
-           ) AS latest ON latest.id = item.id
-           JOIN cold_objects AS object ON object.id = item.record_id
-          WHERE item.reason = 'size' AND item.file_status = 'failed'`,
+        `SELECT DISTINCT failed.record_id
+           FROM cold_storage_cleanup_items AS failed
+           JOIN cold_objects AS object ON object.id = failed.record_id
+          WHERE failed.item_kind = 'object'
+            AND failed.reason = 'size'
+            AND failed.file_status = 'failed'
+            AND NOT EXISTS (
+              SELECT 1
+                FROM cold_storage_cleanup_items AS resolved
+               WHERE resolved.item_kind = 'object'
+                 AND resolved.record_id = failed.record_id
+                 AND resolved.id > failed.id
+                 AND resolved.file_status IN ('deleted', 'missing')
+            )`,
       )
       .pluck()
       .all() as string[],

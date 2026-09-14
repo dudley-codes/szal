@@ -616,6 +616,92 @@ test("cleanup retries failed size deletions after reaching the size target", () 
   }
 });
 
+test("failed expiry attempts do not cancel pending size retries", () => {
+  const storage = createStorage();
+  const initialPolicy = { enabled: true, maxBytes: 12, retentionDays: 0 };
+  const reducedPolicy = { enabled: true, maxBytes: 6, retentionDays: 0 };
+  let payloadDirectory;
+
+  try {
+    const first = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      {
+        category: "memory",
+        createdAt: START.toISOString(),
+        expiresAt: new Date(START.getTime() + DAY_MS).toISOString(),
+        referenceId: "reference-1",
+      },
+      { now: START, policy: initialPolicy },
+    );
+    const secondTime = new Date(START.getTime() + 60 * 60 * 1_000);
+    storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "bbbbbb",
+      { category: "memory", createdAt: secondTime.toISOString(), referenceId: "reference-2" },
+      { now: secondTime, policy: initialPolicy },
+    );
+    payloadDirectory = dirname(first.filePath);
+    chmodSync(payloadDirectory, 0o500);
+
+    const sizeCleanup = cleanupColdStorage(
+      storage.database.connection,
+      storage.database.paths,
+      reducedPolicy,
+      { now: new Date(START.getTime() + 2 * 60 * 60 * 1_000) },
+    );
+    assert.deepEqual(
+      sizeCleanup.deletedObjects.map(({ fileStatus, reason }) => ({ fileStatus, reason })),
+      [
+        { fileStatus: "failed", reason: "size" },
+        { fileStatus: "deleted", reason: "size" },
+      ],
+    );
+
+    const expiryTime = new Date(START.getTime() + 2 * DAY_MS);
+    const expiryCleanup = cleanupColdStorage(
+      storage.database.connection,
+      storage.database.paths,
+      reducedPolicy,
+      { now: expiryTime },
+    );
+    assert.deepEqual(
+      expiryCleanup.deletedObjects.map(({ fileStatus, reason }) => ({ fileStatus, reason })),
+      [{ fileStatus: "failed", reason: "expiry" }],
+    );
+
+    chmodSync(payloadDirectory, 0o700);
+    payloadDirectory = undefined;
+    storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      { category: "memory", referenceId: "reference-3" },
+      { now: expiryTime, policy: reducedPolicy },
+    );
+    const retry = cleanupColdStorage(
+      storage.database.connection,
+      storage.database.paths,
+      reducedPolicy,
+      { now: expiryTime },
+    );
+
+    assert.equal(retry.beforeBytes, 6);
+    assert.equal(retry.afterBytes, 0);
+    assert.deepEqual(
+      retry.deletedObjects.map(({ fileStatus, id, reason }) => ({ fileStatus, id, reason })),
+      [{ fileStatus: "deleted", id: first.id, reason: "size" }],
+    );
+  } finally {
+    if (payloadDirectory !== undefined) {
+      chmodSync(payloadDirectory, 0o700);
+    }
+    closeStorage(storage);
+  }
+});
+
 test("cleanup records file permission failures instead of claiming successful deletion", () => {
   const storage = createStorage();
   const policy = { enabled: true, maxBytes: 1_000, retentionDays: 0 };
