@@ -542,6 +542,80 @@ test("capacity rejection audits compensating payload deletion", () => {
   }
 });
 
+test("cleanup retries failed size deletions after reaching the size target", () => {
+  const storage = createStorage();
+  const initialPolicy = { enabled: true, maxBytes: 12, retentionDays: 0 };
+  const reducedPolicy = { enabled: true, maxBytes: 6, retentionDays: 0 };
+  let payloadDirectory;
+
+  try {
+    const first = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      { category: "memory", createdAt: START.toISOString(), referenceId: "reference-1" },
+      { now: START, policy: initialPolicy },
+    );
+    const second = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "bbbbbb",
+      {
+        category: "memory",
+        createdAt: new Date(START.getTime() + DAY_MS).toISOString(),
+        referenceId: "reference-2",
+      },
+      { now: new Date(START.getTime() + DAY_MS), policy: initialPolicy },
+    );
+    payloadDirectory = dirname(first.filePath);
+    chmodSync(payloadDirectory, 0o500);
+
+    const initialCleanup = cleanupColdStorage(
+      storage.database.connection,
+      storage.database.paths,
+      reducedPolicy,
+    );
+    assert.equal(initialCleanup.afterBytes, 6);
+    assert.deepEqual(
+      initialCleanup.deletedObjects.map(({ fileStatus, id }) => ({ fileStatus, id })),
+      [
+        { fileStatus: "failed", id: first.id },
+        { fileStatus: "deleted", id: second.id },
+      ],
+    );
+
+    chmodSync(payloadDirectory, 0o700);
+    payloadDirectory = undefined;
+    const retry = cleanupColdStorage(
+      storage.database.connection,
+      storage.database.paths,
+      reducedPolicy,
+    );
+
+    assert.equal(retry.beforeBytes, 6);
+    assert.equal(retry.afterBytes, 0);
+    assert.deepEqual(
+      retry.deletedObjects.map(({ fileStatus, id, reason }) => ({ fileStatus, id, reason })),
+      [{ fileStatus: "deleted", id: first.id, reason: "size" }],
+    );
+    assert.deepEqual(
+      storage.database.connection
+        .prepare(
+          `SELECT record_id, reason, file_status
+             FROM cold_storage_cleanup_items
+            WHERE run_id = ? AND item_kind = 'object'`,
+        )
+        .all(retry.runId),
+      [{ file_status: "deleted", reason: "size", record_id: first.id }],
+    );
+  } finally {
+    if (payloadDirectory !== undefined) {
+      chmodSync(payloadDirectory, 0o700);
+    }
+    closeStorage(storage);
+  }
+});
+
 test("cleanup records file permission failures instead of claiming successful deletion", () => {
   const storage = createStorage();
   const policy = { enabled: true, maxBytes: 1_000, retentionDays: 0 };

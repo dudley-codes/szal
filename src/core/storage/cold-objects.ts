@@ -448,6 +448,23 @@ const executeCleanup = (
         left.id.localeCompare(right.id),
     )
     .map((object): PlannedColdObjectDeletion => ({ ...object, reason: "size" }));
+  const pendingSizeRetryIds = new Set(
+    database
+      .prepare(
+        `SELECT item.record_id
+           FROM cold_storage_cleanup_items AS item
+           JOIN (
+             SELECT record_id, MAX(id) AS id
+               FROM cold_storage_cleanup_items
+              WHERE item_kind = 'object'
+              GROUP BY record_id
+           ) AS latest ON latest.id = item.id
+           JOIN cold_objects AS object ON object.id = item.record_id
+          WHERE item.reason = 'size' AND item.file_status = 'failed'`,
+      )
+      .pluck()
+      .all() as string[],
+  );
 
   const insertItem = database.prepare(
     `INSERT INTO cold_storage_cleanup_items (
@@ -541,7 +558,18 @@ const executeCleanup = (
   }
 
   const targetBytes = policy.maxBytes - reserveBytes;
+  const attemptedSizeRetryIds = new Set<string>();
   for (const object of evictionCandidates) {
+    if (!pendingSizeRetryIds.has(object.id)) {
+      continue;
+    }
+    removeObject(object);
+    attemptedSizeRetryIds.add(object.id);
+  }
+  for (const object of evictionCandidates) {
+    if (attemptedSizeRetryIds.has(object.id)) {
+      continue;
+    }
     if (afterBytes <= targetBytes) {
       break;
     }
