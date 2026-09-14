@@ -14,9 +14,15 @@ Commands:
   config set <path> <value>   Update one configuration value
   on                          Enable compression in this terminal
   off                         Use pass-through compression in this terminal
+  shell                       Manage bash/zsh shell integration
   status                      Show terminal, project, agent, engine, and telemetry state
   help                        Show command help
   version                     Show the installed version
+
+Shell integration:
+  szal shell install [bash|zsh] [--terminal-id]
+  szal shell uninstall [bash|zsh]
+  szal shell restore [bash|zsh]
 
 Options:
   -on, --on         Alias for on

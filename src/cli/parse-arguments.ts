@@ -1,4 +1,4 @@
-export type CliCommandName = "config" | "help" | "off" | "on" | "status" | "version";
+export type CliCommandName = "config" | "help" | "off" | "on" | "shell" | "status" | "version";
 
 export type ParsedArguments =
   | { arguments_?: readonly string[]; command: CliCommandName; kind: "command" }
@@ -9,6 +9,7 @@ const COMMAND_ALIASES: ReadonlyMap<string, CliCommandName> = new Map([
   ["help", "help"],
   ["--help", "help"],
   ["-h", "help"],
+  ["shell", "shell"],
   ["off", "off"],
   ["--off", "off"],
   ["-off", "off"],

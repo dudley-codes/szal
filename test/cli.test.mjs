@@ -50,6 +50,14 @@ test("version aliases resolve to one command", () => {
   }
 });
 
+test("shell subcommands retain their arguments for the handler", () => {
+  assert.deepEqual(parseArguments(["shell", "install", "zsh", "--terminal-id"]), {
+    arguments_: ["install", "zsh", "--terminal-id"],
+    command: "shell",
+    kind: "command",
+  });
+});
+
 test("no arguments show help", () => {
   const result = captureCli([]);
 

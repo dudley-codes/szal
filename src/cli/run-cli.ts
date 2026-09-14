@@ -1,5 +1,9 @@
+import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
+
 import { runConfig } from "./commands/config.js";
 import { runHelp } from "./commands/help.js";
+import { runShell } from "./commands/shell.js";
 import { runOff, runOn } from "./commands/terminal-state.js";
 import { runStatus } from "./commands/status.js";
 import type { CliComponentStatus, CommandHandler } from "./commands/types.js";
@@ -15,6 +19,7 @@ export interface CliOptions {
   agent?: CliComponentStatus;
   engine?: CliComponentStatus;
   environment?: Readonly<Record<string, string | undefined>>;
+  homeDirectory?: string;
   projectDirectory?: string;
   version: string;
 }
@@ -24,6 +29,7 @@ const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   help: runHelp,
   off: runOff,
   on: runOn,
+  shell: runShell,
   status: runStatus,
   version: runVersion,
 };
@@ -44,6 +50,13 @@ export const runCli = (
   io: CliIo = DEFAULT_IO,
 ): number => {
   const parsedArguments = parseArguments(arguments_);
+  const environment = options.environment ?? process.env;
+  const environmentHome = environment.HOME;
+  const homeDirectory =
+    options.homeDirectory ??
+    (environmentHome !== undefined && environmentHome.length > 0 && isAbsolute(environmentHome)
+      ? environmentHome
+      : homedir());
 
   if (parsedArguments.kind === "invalid") {
     io.stderr(`Unknown command: ${parsedArguments.input || "(empty)"}`);
@@ -55,7 +68,8 @@ export const runCli = (
     ...(options.agent === undefined ? {} : { agent: options.agent }),
     arguments_: parsedArguments.arguments_ ?? [],
     ...(options.engine === undefined ? {} : { engine: options.engine }),
-    environment: options.environment ?? process.env,
+    environment,
+    homeDirectory,
     projectDirectory: options.projectDirectory ?? process.cwd(),
     stderr: io.stderr,
     stdout: io.stdout,

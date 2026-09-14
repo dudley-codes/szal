@@ -11,6 +11,7 @@ export interface CommandContext {
   arguments_: readonly string[];
   engine?: CliComponentStatus;
   environment: Readonly<Record<string, string | undefined>>;
+  homeDirectory: string;
   projectDirectory: string;
   stderr: (message: string) => void;
   stdout: (message: string) => void;
