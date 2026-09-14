@@ -394,14 +394,26 @@ const executeCleanup = (
 
   const objects = database
     .prepare(
-      "SELECT id, content_hash, relative_path, raw_bytes, created_at FROM cold_objects ORDER BY created_at, id",
+      "SELECT id, content_hash, relative_path, raw_bytes, created_at FROM cold_objects",
     )
     .all() as ColdObjectRow[];
+  const normalizedObjectCreatedAt = new Map(
+    objects.map((object) => [
+      object.id,
+      normalizeDate(object.created_at, `Cold object ${object.id} created_at`),
+    ]),
+  );
   const expiredObjectIds = new Set(
     expiredReferences.map(({ reference }) => reference.cold_object_id),
   );
   const orphanedObjects = objects
     .filter((object) => (activeReferenceCount.get(object.id) ?? 0) === 0)
+    .sort(
+      (left, right) =>
+        (normalizedObjectCreatedAt.get(left.id) ?? "").localeCompare(
+          normalizedObjectCreatedAt.get(right.id) ?? "",
+        ) || left.id.localeCompare(right.id),
+    )
     .map(
       (object): PlannedColdObjectDeletion => ({
         ...object,
@@ -410,9 +422,13 @@ const executeCleanup = (
     );
   const oldestActiveReference = new Map<string, string>();
   for (const reference of activeReferences) {
+    const createdAt = normalizeDate(
+      reference.created_at,
+      `Cold reference ${reference.id} created_at`,
+    );
     const oldest = oldestActiveReference.get(reference.cold_object_id);
-    if (oldest === undefined || reference.created_at < oldest) {
-      oldestActiveReference.set(reference.cold_object_id, reference.created_at);
+    if (oldest === undefined || createdAt < oldest) {
+      oldestActiveReference.set(reference.cold_object_id, createdAt);
     }
   }
   const evictionCandidates = objects
@@ -424,7 +440,11 @@ const executeCleanup = (
       (left, right) =>
         (oldestActiveReference.get(left.id) ?? "").localeCompare(
           oldestActiveReference.get(right.id) ?? "",
-        ) || left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id),
+        ) ||
+        (normalizedObjectCreatedAt.get(left.id) ?? "").localeCompare(
+          normalizedObjectCreatedAt.get(right.id) ?? "",
+        ) ||
+        left.id.localeCompare(right.id),
     )
     .map((object): PlannedColdObjectDeletion => ({ ...object, reason: "size" }));
 
@@ -448,6 +468,7 @@ const executeCleanup = (
   );
   const deleteObject = database.prepare("DELETE FROM cold_objects WHERE id = ?");
   const removedExpiredReferenceIds: string[] = [];
+  const removedExpiredReferenceIdSet = new Set<string>();
   const deletedObjects: DeletedColdObject[] = [];
   let afterBytes = beforeBytes;
 
@@ -468,6 +489,7 @@ const executeCleanup = (
             null,
           );
           removedExpiredReferenceIds.push(referenceId);
+          removedExpiredReferenceIdSet.add(referenceId);
         }
         clearCompressionEvent.run(referenceId);
       }
@@ -505,7 +527,7 @@ const executeCleanup = (
   );
   for (const { reference } of expiredReferences) {
     if (
-      removedExpiredReferenceIds.includes(reference.id) ||
+      removedExpiredReferenceIdSet.has(reference.id) ||
       retainedFailedObjectIds.has(reference.cold_object_id)
     ) {
       continue;
@@ -514,6 +536,7 @@ const executeCleanup = (
     clearCompressionEvent.run(reference.id);
     deleteReference.run(reference.id);
     removedExpiredReferenceIds.push(reference.id);
+    removedExpiredReferenceIdSet.add(reference.id);
   }
 
   const targetBytes = policy.maxBytes - reserveBytes;
@@ -538,11 +561,20 @@ const executeCleanup = (
   database
     .prepare(
       `UPDATE cold_storage_cleanup_runs
-          SET status = ?, after_bytes = ?, deleted_objects = ?, deleted_bytes = ?,
-              error_count = ?, completed_at = ?
+          SET status = ?, after_bytes = ?, expired_references = ?, deleted_objects = ?,
+              deleted_bytes = ?, error_count = ?, completed_at = ?
         WHERE id = ?`,
     )
-    .run(status, afterBytes, deletedObjectCount, deletedBytes, errorCount, completedAt, runId);
+    .run(
+      status,
+      afterBytes,
+      removedExpiredReferenceIds.length,
+      deletedObjectCount,
+      deletedBytes,
+      errorCount,
+      completedAt,
+      runId,
+    );
 
   return {
     afterBytes,

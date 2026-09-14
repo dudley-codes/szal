@@ -209,12 +209,13 @@ test("retention cleanup removes expired references only when their content is no
       readColdObject(storage.database.connection, storage.database.paths, first.id).status,
       "missing",
     );
-    assert.equal(
+    assert.deepEqual(
       storage.database.connection
-        .prepare("SELECT status FROM cold_storage_cleanup_runs WHERE id = ?")
-        .pluck()
+        .prepare(
+          "SELECT status, expired_references FROM cold_storage_cleanup_runs WHERE id = ?",
+        )
         .get(completeCleanup.runId),
-      "completed",
+      { expired_references: 1, status: "completed" },
     );
     assert.deepEqual(
       storage.database.connection
@@ -295,6 +296,54 @@ test("size enforcement evicts the oldest object deterministically and rejects ov
           { policy },
         ),
       /exceeds the configured cold storage limit/i,
+    );
+  } finally {
+    closeStorage(storage);
+  }
+});
+
+test("size enforcement orders legacy offset timestamps chronologically", () => {
+  const storage = createStorage();
+  const initialPolicy = { enabled: true, maxBytes: 12, retentionDays: 0 };
+  const reducedPolicy = { enabled: true, maxBytes: 6, retentionDays: 0 };
+
+  try {
+    const earlier = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      { category: "memory", referenceId: "reference-1" },
+      { policy: initialPolicy },
+    );
+    const later = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "bbbbbb",
+      { category: "memory", referenceId: "reference-2" },
+      { policy: initialPolicy },
+    );
+    storage.database.connection
+      .prepare("UPDATE cold_object_references SET created_at = ? WHERE id = ?")
+      .run("2026-01-01T01:00:00+02:00", "reference-1");
+    storage.database.connection
+      .prepare("UPDATE cold_object_references SET created_at = ? WHERE id = ?")
+      .run("2026-01-01T00:00:00Z", "reference-2");
+    storage.database.connection
+      .prepare("UPDATE cold_objects SET created_at = ? WHERE id = ?")
+      .run("2026-01-01T01:00:00+02:00", earlier.id);
+    storage.database.connection
+      .prepare("UPDATE cold_objects SET created_at = ? WHERE id = ?")
+      .run("2026-01-01T00:00:00Z", later.id);
+
+    cleanupColdStorage(storage.database.connection, storage.database.paths, reducedPolicy);
+
+    assert.equal(
+      readColdObject(storage.database.connection, storage.database.paths, earlier.id).status,
+      "missing",
+    );
+    assert.equal(
+      readColdObject(storage.database.connection, storage.database.paths, later.id).status,
+      "found",
     );
   } finally {
     closeStorage(storage);
