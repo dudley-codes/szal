@@ -2,8 +2,24 @@ export const COMPRESSION_PROFILES = ["safe", "balanced", "aggressive", "off"] as
 
 export const ENGINE_MODES = ["auto", "enabled", "disabled"] as const;
 
+export const CONTENT_CATEGORIES = [
+  "conversation",
+  "code",
+  "bash",
+  "tests",
+  "json",
+  "markdown",
+  "memory",
+  "cold-storage",
+  "responses",
+] as const;
+
+export const COMPRESSION_OWNERS = ["auto", "raw", "llmtrim", "squeez"] as const;
+
 export type CompressionProfile = (typeof COMPRESSION_PROFILES)[number];
 export type EngineMode = (typeof ENGINE_MODES)[number];
+export type ContentCategory = (typeof CONTENT_CATEGORIES)[number];
+export type CompressionOwnerPreference = (typeof COMPRESSION_OWNERS)[number];
 
 export interface EngineConfig {
   [key: string]: unknown;
@@ -28,6 +44,7 @@ export interface SzalConfig {
     maxItems: number;
   };
   modelWindows: Record<string, number>;
+  ownership: Record<ContentCategory, CompressionOwnerPreference>;
   profile: CompressionProfile;
   retention: {
     [key: string]: unknown;
@@ -61,6 +78,17 @@ export const DEFAULT_CONFIG: SzalConfig = {
     maxItems: 10_000,
   },
   modelWindows: {},
+  ownership: {
+    bash: "auto",
+    code: "auto",
+    "cold-storage": "raw",
+    conversation: "auto",
+    json: "auto",
+    markdown: "auto",
+    memory: "auto",
+    responses: "auto",
+    tests: "auto",
+  },
   profile: "balanced",
   retention: {
     coldStorageDays: 30,

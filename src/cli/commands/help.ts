@@ -12,6 +12,7 @@ Commands:
   config                      Show the global configuration
   config get <path>           Read one configuration value
   config set <path> <value>   Update one configuration value
+  doctor                      Report engine and compression ownership health
   on                          Enable compression in this terminal
   off                         Use pass-through compression in this terminal
   shell                       Manage bash/zsh shell integration
@@ -29,6 +30,6 @@ Options:
   -off, --off       Alias for off
   -h, --help        Show command help
   -v, --version     Show the installed version
-  --json           Emit JSON for config commands`);
+  --json           Emit JSON for config and doctor commands`);
   return 0;
 };

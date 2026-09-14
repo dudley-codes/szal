@@ -2,7 +2,7 @@
 
 Szal is an agent-agnostic context virtualization layer for terminal-based coding agents.
 
-This repository currently contains the TypeScript CLI, persistent storage, and global configuration foundations. Context compression, agent adapters, and telemetry are tracked in later milestones.
+This repository currently contains the TypeScript CLI, persistent storage, global configuration, shell state, telemetry, adapter contracts, and compression ownership policy.
 
 ## Requirements
 
@@ -63,6 +63,8 @@ szal --version
 szal on
 szal off
 szal status
+szal doctor
+szal doctor --json
 szal shell install [bash|zsh] [--terminal-id]
 szal shell uninstall [bash|zsh]
 szal shell restore [bash|zsh]
@@ -93,6 +95,8 @@ Values are addressed with dotted paths. Model names after `modelWindows.` are tr
 
 ```bash
 szal config set engines.llmtrim.mode disabled
+szal config set ownership.markdown raw
+szal config set ownership.code squeez
 szal config set retention.telemetryDays 30
 szal config set stats.enabled false
 szal config set modelWindows.gpt-5.2 400000
@@ -100,6 +104,28 @@ szal config get modelWindows.gpt-5.2 --json
 ```
 
 Values that parse as JSON retain their JSON type; other values are stored as strings. Every update validates the complete configuration before writing, preserves safe unknown fields, atomically replaces `config.json`, and saves the previous bytes as `config.json.bak`. Invalid files and updates produce a field-specific error without overwriting the current file.
+
+## Compression ownership
+
+Every content category has exactly one effective owner: `llmtrim`, `squeez`, or raw pass-through. Set a category to `auto`, `raw`, `llmtrim`, or `squeez` under `ownership`. Automatic ownership follows this matrix when the corresponding safe engine capability is available:
+
+| Category     | Safe    | Balanced | Aggressive |
+| ------------ | ------- | -------- | ---------- |
+| Conversation | llmtrim | llmtrim  | llmtrim    |
+| Code         | raw     | squeez   | squeez     |
+| Bash         | squeez  | squeez   | squeez     |
+| Tests        | squeez  | squeez   | squeez     |
+| JSON         | squeez  | squeez   | squeez     |
+| Markdown     | raw     | squeez   | squeez     |
+| Memory       | raw     | raw      | squeez     |
+| Cold storage | raw     | raw      | raw        |
+| Responses    | llmtrim | llmtrim  | llmtrim    |
+
+The `off` profile leaves every category raw. If the preferred automatic owner is missing, Szal uses another engine only when that engine explicitly declares a safe capability for the category. Otherwise it downgrades to raw. Multiple active lossy claims are rejected, and lossy capabilities must declare recovery plus preservation of failures, exact identifiers, paths, errors, commands, URLs, types, schema fields, negations, rejected approaches, and user constraints.
+
+Cold storage stays raw by default and can be assigned only to a capability declared lossless. Szal never invokes squeez's in-place Markdown compression, so project source remains canonical.
+
+`szal doctor` reports the effective owner and safety state for every category. `szal doctor --json` also reports squeez detection, version, detected hosts, and each host's supported session and tool surfaces. Squeez 1.46.0 or newer is required before Szal grants it lossy ownership because that release activates the upstream preservation guard.
 
 ## Design constraints
 

@@ -15,7 +15,9 @@ import { homedir } from "node:os";
 
 import { resolveConfigPaths, type ConfigPaths } from "./paths.js";
 import {
+  COMPRESSION_OWNERS,
   COMPRESSION_PROFILES,
+  CONTENT_CATEGORIES,
   DEFAULT_CONFIG,
   ENGINE_MODES,
   type LoadedConfig,
@@ -130,6 +132,11 @@ export const validateConfig: (value: unknown) => asserts value is SzalConfig = (
     const engine = value.engines[engineName];
     assertRecord(engine, `engines.${engineName}`);
     assertEnum(engine.mode, `engines.${engineName}.mode`, ENGINE_MODES);
+  }
+
+  assertRecord(value.ownership, "ownership");
+  for (const category of CONTENT_CATEGORIES) {
+    assertEnum(value.ownership[category], `ownership.${category}`, COMPRESSION_OWNERS);
   }
 
   assertRecord(value.retention, "retention");

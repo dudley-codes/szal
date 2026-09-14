@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 
 import { runConfig } from "./commands/config.js";
+import { runDoctor } from "./commands/doctor.js";
 import { runHelp } from "./commands/help.js";
 import { runShell } from "./commands/shell.js";
 import { runOff, runOn } from "./commands/terminal-state.js";
@@ -9,6 +10,7 @@ import { runStatus } from "./commands/status.js";
 import type { CliComponentStatus, CommandHandler } from "./commands/types.js";
 import { runVersion } from "./commands/version.js";
 import { parseArguments, type CliCommandName } from "./parse-arguments.js";
+import type { CompressionEngineState } from "../core/compression/index.js";
 
 export interface CliIo {
   stderr: (message: string) => void;
@@ -17,6 +19,7 @@ export interface CliIo {
 
 export interface CliOptions {
   agent?: CliComponentStatus;
+  compressionEngines?: readonly CompressionEngineState[];
   engine?: CliComponentStatus;
   environment?: Readonly<Record<string, string | undefined>>;
   homeDirectory?: string;
@@ -26,6 +29,7 @@ export interface CliOptions {
 
 const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   config: runConfig,
+  doctor: runDoctor,
   help: runHelp,
   off: runOff,
   on: runOn,
@@ -67,6 +71,9 @@ export const runCli = (
   return COMMAND_HANDLERS[parsedArguments.command]({
     ...(options.agent === undefined ? {} : { agent: options.agent }),
     arguments_: parsedArguments.arguments_ ?? [],
+    ...(options.compressionEngines === undefined
+      ? {}
+      : { compressionEngines: options.compressionEngines }),
     ...(options.engine === undefined ? {} : { engine: options.engine }),
     environment,
     homeDirectory,

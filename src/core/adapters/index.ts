@@ -5,6 +5,18 @@ export {
   type CompressionEngineCapabilityName,
 } from "./compression-engine.js";
 export {
+  MINIMUM_SAFE_SQUEEZ_VERSION,
+  SQUEEZ_COMPRESSION_CAPABILITIES,
+  SQUEEZ_SUPPORTED_HOSTS,
+  createSqueezAdapter,
+  inspectSqueez,
+  squeezEngineState,
+  type SqueezAdapterOptions,
+  type SqueezCommandResult,
+  type SqueezCommandRunner,
+  type SqueezDetectionDetails,
+} from "./squeez.js";
+export {
   availableCapability,
   degradedCapability,
   unavailableCapability,
