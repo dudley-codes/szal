@@ -50,7 +50,7 @@ SELECT 2, 'object', id, 'created_at', created_at,
        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'invalid_timestamp',
        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   FROM cold_objects
- WHERE julianday(created_at) IS NULL;
+ WHERE strftime('%Y-%m-%dT%H:%M:%fZ', created_at) IS NULL;
 
 UPDATE cold_objects
    SET created_at = (
@@ -69,6 +69,9 @@ UPDATE cold_objects
       AND field_name = 'created_at'
  );
 
+UPDATE cold_objects
+   SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', created_at);
+
 INSERT INTO cold_storage_migration_repairs (
   migration_version, record_kind, record_id, field_name, original_value,
   repaired_value, reason, repaired_at
@@ -77,7 +80,7 @@ SELECT 2, 'reference', id, 'created_at', created_at,
        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'invalid_timestamp',
        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   FROM cold_object_references
- WHERE julianday(created_at) IS NULL;
+ WHERE strftime('%Y-%m-%dT%H:%M:%fZ', created_at) IS NULL;
 
 UPDATE cold_object_references
    SET created_at = (
@@ -96,6 +99,9 @@ UPDATE cold_object_references
       AND field_name = 'created_at'
  );
 
+UPDATE cold_object_references
+   SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', created_at);
+
 INSERT INTO cold_storage_migration_repairs (
   migration_version, record_kind, record_id, field_name, original_value,
   repaired_value, reason, repaired_at
@@ -104,7 +110,7 @@ SELECT 2, 'reference', id, 'expires_at', expires_at, NULL,
        'invalid_timestamp', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
   FROM cold_object_references
  WHERE expires_at IS NOT NULL
-   AND julianday(expires_at) IS NULL;
+   AND strftime('%Y-%m-%dT%H:%M:%fZ', expires_at) IS NULL;
 
 UPDATE cold_object_references
    SET expires_at = NULL
@@ -115,6 +121,10 @@ UPDATE cold_object_references
       AND record_kind = 'reference'
       AND field_name = 'expires_at'
  );
+
+UPDATE cold_object_references
+   SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', expires_at)
+ WHERE expires_at IS NOT NULL;
 
 CREATE INDEX cold_storage_cleanup_runs_started_idx
   ON cold_storage_cleanup_runs(started_at);

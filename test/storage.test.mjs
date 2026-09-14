@@ -248,6 +248,67 @@ test("cold-storage migration repairs malformed legacy timestamps without losing 
   }
 });
 
+test("cold-storage migration canonicalizes numeric legacy timestamps", () => {
+  const database = new BetterSqlite3(":memory:");
+  const homeDirectory = createTemporaryHome();
+  const paths = resolveStoragePaths({}, homeDirectory);
+  const initialMigration = MIGRATIONS[0];
+  assert.notEqual(initialMigration, undefined);
+  const payload = Buffer.from("recoverable numeric-timestamp payload");
+  const contentHash = createHash("sha256").update(payload).digest("hex");
+  const id = `szal://cold/sha256/${contentHash}`;
+  const relativePath = join("sha256", contentHash.slice(0, 2), contentHash);
+  const filePath = join(paths.coldDirectory, relativePath);
+  const policy = { enabled: true, maxBytes: 1_000, retentionDays: 0 };
+
+  try {
+    applyMigrations(database, [initialMigration]);
+    mkdirSync(join(paths.coldDirectory, "sha256", contentHash.slice(0, 2)), {
+      mode: 0o700,
+      recursive: true,
+    });
+    writeFileSync(filePath, payload, { mode: 0o600 });
+    database
+      .prepare(
+        `INSERT INTO cold_objects (
+           id, content_hash, relative_path, raw_bytes, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, contentHash, relativePath, payload.byteLength, "2451545");
+    database
+      .prepare(
+        `INSERT INTO cold_object_references (
+           id, cold_object_id, category, created_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("numeric-legacy-reference", id, "memory", "2451545", "2451546");
+
+    applyMigrations(database);
+
+    assert.equal(
+      database.prepare("SELECT created_at FROM cold_objects WHERE id = ?").pluck().get(id),
+      "2000-01-01T12:00:00.000Z",
+    );
+    assert.deepEqual(
+      database
+        .prepare("SELECT created_at, expires_at FROM cold_object_references WHERE id = ?")
+        .get("numeric-legacy-reference"),
+      {
+        created_at: "2000-01-01T12:00:00.000Z",
+        expires_at: "2000-01-02T12:00:00.000Z",
+      },
+    );
+    assert.deepEqual(readFileSync(filePath), payload);
+    assert.equal(cleanupColdStorage(database, paths, policy).status, "completed");
+    assert.doesNotThrow(() =>
+      storeColdObject(database, paths, "new payload", { category: "memory" }, { policy }),
+    );
+  } finally {
+    database.close();
+    rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
+
 test("an upgrade applies only pending migrations and keeps existing rows", () => {
   const database = new BetterSqlite3(":memory:");
   const migrationOne = {
