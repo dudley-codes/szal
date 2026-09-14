@@ -451,6 +451,97 @@ test("invalid new references cannot trigger capacity eviction", () => {
   }
 });
 
+test("capacity rejection audits compensating payload deletion", () => {
+  const storage = createStorage();
+  const policy = { enabled: true, maxBytes: 10, retentionDays: 0 };
+  let payloadDirectory;
+
+  try {
+    const stored = storeColdObject(
+      storage.database.connection,
+      storage.database.paths,
+      "aaaaaa",
+      { category: "memory", referenceId: "reference-1" },
+      { policy },
+    );
+    payloadDirectory = dirname(stored.filePath);
+    chmodSync(payloadDirectory, 0o500);
+
+    assert.throws(
+      () =>
+        storeColdObject(
+          storage.database.connection,
+          storage.database.paths,
+          "bbbbbb",
+          { category: "memory", referenceId: "reference-2" },
+          { policy },
+        ),
+      /could not enforce the configured storage limit/i,
+    );
+
+    const run = storage.database.connection
+      .prepare(
+        `SELECT id, status, before_bytes, after_bytes, deleted_objects, deleted_bytes, error_count
+           FROM cold_storage_cleanup_runs
+          ORDER BY rowid DESC
+          LIMIT 1`,
+      )
+      .get();
+    assert.deepEqual(
+      {
+        after_bytes: run.after_bytes,
+        before_bytes: run.before_bytes,
+        deleted_bytes: run.deleted_bytes,
+        deleted_objects: run.deleted_objects,
+        error_count: run.error_count,
+        status: run.status,
+      },
+      {
+        after_bytes: 6,
+        before_bytes: 12,
+        deleted_bytes: 6,
+        deleted_objects: 1,
+        error_count: 1,
+        status: "completed_with_errors",
+      },
+    );
+    assert.deepEqual(
+      storage.database.connection
+        .prepare(
+          `SELECT reason, raw_bytes, file_status
+             FROM cold_storage_cleanup_items
+            WHERE run_id = ? AND item_kind = 'object'
+            ORDER BY id`,
+        )
+        .all(run.id),
+      [
+        { file_status: "failed", raw_bytes: 6, reason: "size" },
+        { file_status: "deleted", raw_bytes: 6, reason: "size" },
+      ],
+    );
+    assert.equal(
+      readColdObject(storage.database.connection, storage.database.paths, stored.id).status,
+      "found",
+    );
+    assert.equal(
+      storage.database.connection.prepare("SELECT COUNT(*) FROM cold_objects").pluck().get(),
+      1,
+    );
+    assert.equal(
+      storage.database.connection
+        .prepare("SELECT COUNT(*) FROM cold_object_references WHERE id = ?")
+        .pluck()
+        .get("reference-2"),
+      0,
+    );
+  } finally {
+    if (payloadDirectory !== undefined) {
+      chmodSync(payloadDirectory, 0o700);
+    }
+    closeStorage(storage);
+  }
+});
+
 test("cleanup records file permission failures instead of claiming successful deletion", () => {
   const storage = createStorage();
   const policy = { enabled: true, maxBytes: 1_000, retentionDays: 0 };

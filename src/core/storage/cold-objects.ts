@@ -335,6 +335,7 @@ const executeCleanup = (
   startedAt: string,
   reserveBytes: number,
   protectedObjectId?: string,
+  rejectionObjectId?: string,
 ): ColdStorageCleanupResult => {
   const runId = randomUUID();
   const beforeBytes = Number(
@@ -545,6 +546,12 @@ const executeCleanup = (
       break;
     }
     removeObject(object);
+  }
+  if (afterBytes > targetBytes && rejectionObjectId !== undefined) {
+    const rejectionObject = objects.find(({ id }) => id === rejectionObjectId);
+    if (rejectionObject !== undefined) {
+      removeObject({ ...rejectionObject, reason: "size" });
+    }
   }
 
   const errorCount = deletedObjects.filter(
@@ -767,31 +774,25 @@ export const storeColdObject = (
         expiresAt,
       );
 
-    const cleanup = executeCleanup(database, paths, policy, now, 0, identity.id);
-    if (cleanup.afterBytes <= policy.maxBytes) {
+    const cleanup = executeCleanup(
+      database,
+      paths,
+      policy,
+      now,
+      0,
+      identity.id,
+      objectExists ? undefined : identity.id,
+    );
+    const referenceRetained =
+      database.prepare("SELECT 1 FROM cold_object_references WHERE id = ?").pluck().get(referenceId) !==
+      undefined;
+    if (cleanup.afterBytes <= policy.maxBytes && referenceRetained) {
       return undefined;
     }
 
-    database.prepare("DELETE FROM cold_object_references WHERE id = ?").run(referenceId);
-    if (!objectExists) {
-      const fileResult = deleteColdPayload(paths, {
-        content_hash: contentHash,
-        created_at: createdAt,
-        id: identity.id,
-        raw_bytes: contentBytes.byteLength,
-        reason: "orphan",
-        relative_path: identity.relativePath,
-      });
-      if (fileResult.fileStatus !== "failed") {
-        database.prepare("DELETE FROM cold_objects WHERE id = ?").run(identity.id);
-      }
+    if (referenceRetained) {
+      database.prepare("DELETE FROM cold_object_references WHERE id = ?").run(referenceId);
     }
-    const rejectedAfterBytes = Number(
-      database.prepare("SELECT COALESCE(SUM(raw_bytes), 0) FROM cold_objects").pluck().get(),
-    );
-    database
-      .prepare("UPDATE cold_storage_cleanup_runs SET after_bytes = ? WHERE id = ?")
-      .run(rejectedAfterBytes, cleanup.runId);
     return cleanup.runId;
   });
 
