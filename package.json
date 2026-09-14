@@ -1,0 +1,26 @@
+{
+  "name": "szal",
+  "version": "0.1.0",
+  "description": "Agent-agnostic context virtualization for terminal-based coding agents",
+  "type": "module",
+  "bin": {
+    "szal": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "typescript": "^7.0.2"
+  }
+}
