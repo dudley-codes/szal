@@ -196,15 +196,10 @@ test("cold-storage migration repairs malformed legacy timestamps without losing 
       .pluck()
       .get(id);
     const repairedReference = database
-      .prepare(
-        "SELECT created_at, expires_at FROM cold_object_references WHERE id = ?",
-      )
+      .prepare("SELECT created_at, expires_at FROM cold_object_references WHERE id = ?")
       .get("legacy-reference");
     assert.match(repairedObjectCreatedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-    assert.match(
-      repairedReference.created_at,
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-    );
+    assert.match(repairedReference.created_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.equal(repairedReference.expires_at, null);
     assert.deepEqual(
       database

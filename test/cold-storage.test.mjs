@@ -211,9 +211,7 @@ test("retention cleanup removes expired references only when their content is no
     );
     assert.deepEqual(
       storage.database.connection
-        .prepare(
-          "SELECT status, expired_references FROM cold_storage_cleanup_runs WHERE id = ?",
-        )
+        .prepare("SELECT status, expired_references FROM cold_storage_cleanup_runs WHERE id = ?")
         .get(completeCleanup.runId),
       { expired_references: 1, status: "completed" },
     );

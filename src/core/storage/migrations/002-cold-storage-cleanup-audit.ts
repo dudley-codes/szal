@@ -1,5 +1,6 @@
 import type { Migration } from "./types.js";
 
+// Preserve legacy content while canonicalizing timestamps and auditing every invalid-value repair.
 const COLD_STORAGE_CLEANUP_AUDIT_SQL = `
 CREATE TABLE cold_storage_cleanup_runs (
   id TEXT PRIMARY KEY,

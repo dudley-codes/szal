@@ -379,12 +379,8 @@ const executeCleanup = (
         left.expiresAt.localeCompare(right.expiresAt) ||
         left.reference.id.localeCompare(right.reference.id),
     );
-  const expiredReferenceIds = new Set(
-    expiredReferences.map(({ reference }) => reference.id),
-  );
-  const activeReferences = references.filter(
-    (reference) => !expiredReferenceIds.has(reference.id),
-  );
+  const expiredReferenceIds = new Set(expiredReferences.map(({ reference }) => reference.id));
+  const activeReferences = references.filter((reference) => !expiredReferenceIds.has(reference.id));
   const activeReferenceCount = new Map<string, number>();
   for (const reference of activeReferences) {
     activeReferenceCount.set(
@@ -394,9 +390,7 @@ const executeCleanup = (
   }
 
   const objects = database
-    .prepare(
-      "SELECT id, content_hash, relative_path, raw_bytes, created_at FROM cold_objects",
-    )
+    .prepare("SELECT id, content_hash, relative_path, raw_bytes, created_at FROM cold_objects")
     .all() as ColdObjectRow[];
   const normalizedObjectCreatedAt = new Map(
     objects.map((object) => [
@@ -415,12 +409,10 @@ const executeCleanup = (
           normalizedObjectCreatedAt.get(right.id) ?? "",
         ) || left.id.localeCompare(right.id),
     )
-    .map(
-      (object): PlannedColdObjectDeletion => ({
-        ...object,
-        reason: expiredObjectIds.has(object.id) ? "expiry" : "orphan",
-      }),
-    );
+    .map((object): PlannedColdObjectDeletion => ({
+      ...object,
+      reason: expiredObjectIds.has(object.id) ? "expiry" : "orphan",
+    }));
   const oldestActiveReference = new Map<string, string>();
   for (const reference of activeReferences) {
     const createdAt = normalizeDate(
@@ -434,8 +426,7 @@ const executeCleanup = (
   }
   const evictionCandidates = objects
     .filter(
-      (object) =>
-        (activeReferenceCount.get(object.id) ?? 0) > 0 && object.id !== protectedObjectId,
+      (object) => (activeReferenceCount.get(object.id) ?? 0) > 0 && object.id !== protectedObjectId,
     )
     .sort(
       (left, right) =>
@@ -543,9 +534,7 @@ const executeCleanup = (
   }
 
   const retainedFailedObjectIds = new Set(
-    deletedObjects
-      .filter(({ fileStatus }) => fileStatus === "failed")
-      .map(({ id }) => id),
+    deletedObjects.filter(({ fileStatus }) => fileStatus === "failed").map(({ id }) => id),
   );
   for (const { reference } of expiredReferences) {
     if (
@@ -751,18 +740,20 @@ export const storeColdObject = (
   const contentHash = hashContent(contentBytes);
   const identity = identityForHash(paths, contentHash);
   const referenceId = metadata.referenceId ?? randomUUID();
-  let published = false;
+  const payloadState = { published: false };
   const recordMetadata = database.transaction(() => {
     if (
-      database.prepare("SELECT 1 FROM cold_object_references WHERE id = ?").pluck().get(referenceId) !==
-      undefined
+      database
+        .prepare("SELECT 1 FROM cold_object_references WHERE id = ?")
+        .pluck()
+        .get(referenceId) !== undefined
     ) {
       throw new Error(`Cold object reference ${referenceId} already exists.`);
     }
     const objectExists =
       database.prepare("SELECT 1 FROM cold_objects WHERE id = ?").pluck().get(identity.id) !==
       undefined;
-    published = writeColdPayload(identity.filePath, contentBytes, contentHash);
+    payloadState.published = writeColdPayload(identity.filePath, contentBytes, contentHash);
     database
       .prepare(
         `INSERT INTO cold_objects (id, content_hash, relative_path, raw_bytes, created_at)
@@ -816,8 +807,10 @@ export const storeColdObject = (
       objectExists ? undefined : identity.id,
     );
     const referenceRetained =
-      database.prepare("SELECT 1 FROM cold_object_references WHERE id = ?").pluck().get(referenceId) !==
-      undefined;
+      database
+        .prepare("SELECT 1 FROM cold_object_references WHERE id = ?")
+        .pluck()
+        .get(referenceId) !== undefined;
     if (cleanup.afterBytes <= policy.maxBytes && referenceRetained) {
       return undefined;
     }
@@ -835,7 +828,7 @@ export const storeColdObject = (
     const recorded =
       database.prepare("SELECT 1 FROM cold_objects WHERE id = ?").pluck().get(identity.id) !==
       undefined;
-    if (published && !recorded && existsSync(identity.filePath)) {
+    if (payloadState.published && !recorded && existsSync(identity.filePath)) {
       unlinkSync(identity.filePath);
     }
     throw error;
