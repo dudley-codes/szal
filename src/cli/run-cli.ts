@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { runConfig } from "./commands/config.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runHelp } from "./commands/help.js";
+import { runMemory } from "./commands/memory.js";
 import { runShell } from "./commands/shell.js";
 import { runOff, runOn } from "./commands/terminal-state.js";
 import { runStatus } from "./commands/status.js";
@@ -31,6 +32,7 @@ const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   config: runConfig,
   doctor: runDoctor,
   help: runHelp,
+  memory: runMemory,
   off: runOff,
   on: runOn,
   shell: runShell,

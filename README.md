@@ -65,6 +65,35 @@ applies the configured retention and size limits in a stable oldest-first order,
 expired-reference removal, and object deletion outcome in SQLite, and retains failed deletions for
 later retry.
 
+## Structured memory
+
+Structured memory uses the same external SQLite database and never creates a project-local memory
+file. Projects are identified by their absolute Git worktree root when available, including linked
+worktrees, or by their absolute working directory outside Git. Items can represent requirements,
+decisions, constraints, rejected approaches, tasks, errors, file state, symbols, test state, and
+environment state. Each item retains one of the `selected`, `considered`, `rejected`, `superseded`,
+`temporary`, or `unknown` states and references a source session, an artifact URI, or both.
+
+Content, symbols, paths, negations, provenance, and decision details are stored exactly as supplied.
+A successor marks its predecessor superseded in the same transaction, while every prior item and
+decision remains available in the archive. Stored summaries can be restored verbatim for context,
+but only exact records are eligible as future summarization inputs. Migrated records whose
+representation is unknown are also excluded from summarization.
+
+`memory.enabled` gates capture and working-memory retrieval. `memory.maxItems` caps the newest
+current items returned per project without deleting archive or supersession history. Archive export
+remains available when capture is disabled:
+
+```bash
+szal memory export
+szal memory export --current
+szal memory export --project /absolute/project/path
+szal memory export --json
+```
+
+Export writes deterministic Markdown or JSON to stdout only. The default includes full history;
+`--current` omits superseded records. Redirect stdout explicitly when a file is wanted.
+
 After linking, the currently implemented commands are:
 
 ```bash
@@ -75,6 +104,8 @@ szal off
 szal status
 szal doctor
 szal doctor --json
+szal memory export
+szal memory export --current --json
 szal shell install [bash|zsh] [--terminal-id]
 szal shell uninstall [bash|zsh]
 szal shell restore [bash|zsh]

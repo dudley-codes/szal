@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,13 +10,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { join, relative, resolve } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { parseArguments } from "../dist/cli/parse-arguments.js";
 import { runCli } from "../dist/cli/run-cli.js";
 import { REQUIRED_PRESERVATION_FIELDS } from "../dist/core/compression/index.js";
+import {
+  openSzalDatabase,
+  recordTelemetrySession,
+  resolveMemoryProject,
+  storeMemoryItem,
+} from "../dist/core/storage/index.js";
 
 // Capture injected command I/O for focused dispatch tests without spawning a process.
 const captureCli = (arguments_) => {
@@ -40,6 +47,35 @@ const runExecutable = (arguments_, cwd = process.cwd(), environment = process.en
     encoding: "utf8",
     env: environment,
   });
+
+// Capture every repository path and file byte so CLI side effects cannot hide below the root.
+const snapshotDirectory = (rootDirectory) => {
+  const snapshot = [];
+  const visit = (directory) => {
+    const entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
+    for (const entry of entries) {
+      const absolutePath = join(directory, entry.name);
+      const path = relative(rootDirectory, absolutePath);
+      if (entry.isDirectory()) {
+        snapshot.push({ kind: "directory", path });
+        visit(absolutePath);
+      } else if (entry.isFile()) {
+        snapshot.push({
+          bytes: readFileSync(absolutePath).toString("base64"),
+          kind: "file",
+          path,
+        });
+      } else {
+        snapshot.push({ kind: "other", path });
+      }
+    }
+  };
+
+  visit(rootDirectory);
+  return snapshot;
+};
 
 test("help aliases resolve to one command", () => {
   for (const alias of ["help", "--help", "-h"]) {
@@ -73,6 +109,17 @@ test("doctor retains its JSON option for the handler", () => {
     command: "doctor",
     kind: "command",
   });
+});
+
+test("memory export retains project and format options for the handler", () => {
+  assert.deepEqual(
+    parseArguments(["memory", "export", "--project", "nested", "--current", "--json"]),
+    {
+      arguments_: ["export", "--project", "nested", "--current", "--json"],
+      command: "memory",
+      kind: "command",
+    },
+  );
 });
 
 test("no arguments show help", () => {
@@ -180,6 +227,159 @@ test("config commands persist and retrieve global values with JSON output", () =
   } finally {
     rmSync(homeDirectory, { force: true, recursive: true });
     rmSync(projectDirectory, { force: true, recursive: true });
+  }
+});
+
+test("memory export preserves history outside the repository across real CLI processes", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-home-"));
+  const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-project-"));
+  const emptyDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-empty-"));
+  const nestedDirectory = join(projectDirectory, "src");
+  const markerPath = join(nestedDirectory, "Widget.ts");
+  const dataHome = join(homeDirectory, "data");
+  const environment = {
+    ...process.env,
+    HOME: homeDirectory,
+    XDG_DATA_HOME: dataHome,
+  };
+  const exactError = "src/Widget.ts::build<T> must NOT change.\n```text\nerror TS2322\n```\n";
+
+  try {
+    execFileSync("git", ["init", "--quiet", projectDirectory]);
+    mkdirSync(nestedDirectory, { recursive: true });
+    writeFileSync(markerPath, "export const canonical = true;\n");
+
+    const storage = openSzalDatabase({ environment, homeDirectory });
+    try {
+      const project = resolveMemoryProject(storage.connection, nestedDirectory);
+      recordTelemetrySession(storage.connection, {
+        host: "cli-test",
+        id: "session-1",
+        mode: "on",
+        projectId: project.id,
+      });
+      storeMemoryItem(storage.connection, project.id, {
+        class: "decision",
+        content: "Keep Widget<T>",
+        createdAt: "2026-01-02T03:04:01.000Z",
+        decision: { reason: "Preserve exact symbols", rejected: "Rename Widget" },
+        id: "decision-1",
+        source: { sessionId: "session-1" },
+        status: "selected",
+      });
+      storeMemoryItem(storage.connection, project.id, {
+        class: "decision",
+        content: "Keep Widget<T> and its path",
+        createdAt: "2026-01-02T03:04:02.000Z",
+        decision: { reason: "The path is provenance", rejected: "Keep only the name" },
+        id: "decision-2",
+        source: { artifactUri: "artifact://plan/2", sessionId: "session-1" },
+        status: "selected",
+        supersedesId: "decision-1",
+      });
+      storeMemoryItem(storage.connection, project.id, {
+        class: "error",
+        content: exactError,
+        createdAt: "2026-01-02T03:04:03.000Z",
+        id: "error-1",
+        source: { artifactUri: "artifact://test/error" },
+        status: "unknown",
+      });
+    } finally {
+      storage.connection.close();
+    }
+
+    const before = snapshotDirectory(projectDirectory);
+    const fullResult = runExecutable(["memory", "export", "--json"], nestedDirectory, environment);
+    const repeatedResult = runExecutable(
+      ["memory", "export", "--project", "..", "--json"],
+      nestedDirectory,
+      environment,
+    );
+    const currentResult = runExecutable(
+      ["memory", "export", "--current", "--json"],
+      nestedDirectory,
+      environment,
+    );
+    const markdownResult = runExecutable(["memory", "export"], nestedDirectory, environment);
+    const emptyResult = runExecutable(["memory", "export", "--json"], emptyDirectory, environment);
+    const invalidResult = runExecutable(
+      ["memory", "export", "--unknown"],
+      nestedDirectory,
+      environment,
+    );
+
+    assert.equal(fullResult.status, 0, fullResult.stderr);
+    assert.equal(repeatedResult.status, 0, repeatedResult.stderr);
+    assert.equal(repeatedResult.stdout, fullResult.stdout);
+    const fullArchive = JSON.parse(fullResult.stdout);
+    assert.equal(fullArchive.schemaVersion, 1);
+    assert.equal(fullArchive.project.kind, "git-root");
+    assert.equal(
+      fullArchive.project.rootPath,
+      execFileSync(
+        "git",
+        ["-C", projectDirectory, "rev-parse", "--path-format=absolute", "--show-toplevel"],
+        { encoding: "utf8" },
+      ).replace(/\r?\n$/, ""),
+    );
+    assert.deepEqual(
+      fullArchive.items.map(({ content, id, status, supersedesId }) => ({
+        content,
+        id,
+        status,
+        supersedesId,
+      })),
+      [
+        {
+          content: "Keep Widget<T>",
+          id: "decision-1",
+          status: "superseded",
+          supersedesId: null,
+        },
+        {
+          content: "Keep Widget<T> and its path",
+          id: "decision-2",
+          status: "selected",
+          supersedesId: "decision-1",
+        },
+        { content: exactError, id: "error-1", status: "unknown", supersedesId: null },
+      ],
+    );
+    assert.equal(fullArchive.decisions[0].reason, "Preserve exact symbols");
+    assert.equal(fullArchive.decisions[0].rejected, "Rename Widget");
+
+    assert.equal(currentResult.status, 0, currentResult.stderr);
+    const currentArchive = JSON.parse(currentResult.stdout);
+    assert.deepEqual(
+      currentArchive.items.map(({ id }) => id),
+      ["decision-2", "error-1"],
+    );
+    assert.deepEqual(
+      currentArchive.decisions.map(({ id }) => id),
+      ["decision-2"],
+    );
+
+    assert.equal(markdownResult.status, 0, markdownResult.stderr);
+    assert.match(markdownResult.stdout, /^# Structured Memory Archive\n\n````json\n/);
+    assert.match(markdownResult.stdout, /error TS2322/);
+
+    assert.equal(emptyResult.status, 0, emptyResult.stderr);
+    const emptyArchive = JSON.parse(emptyResult.stdout);
+    assert.equal(emptyArchive.project.kind, "cwd");
+    assert.deepEqual(emptyArchive.items, []);
+    assert.deepEqual(emptyArchive.decisions, []);
+
+    assert.equal(invalidResult.status, 1);
+    assert.equal(invalidResult.stdout, "");
+    assert.match(invalidResult.stderr, /Unknown memory export option/);
+    assert.deepEqual(snapshotDirectory(projectDirectory), before);
+    assert.equal(existsSync(join(dataHome, "szal", "szal.db")), true);
+    assert.equal(existsSync(join(projectDirectory, ".szal")), false);
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+    rmSync(projectDirectory, { force: true, recursive: true });
+    rmSync(emptyDirectory, { force: true, recursive: true });
   }
 });
 
