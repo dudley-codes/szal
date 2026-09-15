@@ -1,4 +1,5 @@
 export type CliCommandName =
+  | "cold"
   | "config"
   | "doctor"
   | "help"
@@ -6,6 +7,7 @@ export type CliCommandName =
   | "memory"
   | "off"
   | "on"
+  | "recall"
   | "shell"
   | "status"
   | "uninstall"
@@ -16,6 +18,7 @@ export type ParsedArguments =
   | { input: string; kind: "invalid" };
 
 const COMMAND_ALIASES: ReadonlyMap<string, CliCommandName> = new Map([
+  ["cold", "cold"],
   ["config", "config"],
   ["doctor", "doctor"],
   ["help", "help"],
@@ -26,6 +29,7 @@ const COMMAND_ALIASES: ReadonlyMap<string, CliCommandName> = new Map([
   ["-install", "install"],
   ["memory", "memory"],
   ["shell", "shell"],
+  ["recall", "recall"],
   ["off", "off"],
   ["--off", "off"],
   ["-off", "off"],

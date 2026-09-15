@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 
+import { runCold } from "./commands/cold.js";
 import { runConfig } from "./commands/config.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runHelp } from "./commands/help.js";
@@ -8,6 +9,7 @@ import { runInstall } from "./commands/install.js";
 import { runMemory } from "./commands/memory.js";
 import { runShell } from "./commands/shell.js";
 import { runOff, runOn } from "./commands/terminal-state.js";
+import { runRecall } from "./commands/recall.js";
 import { runStatus } from "./commands/status.js";
 import type { CliComponentStatus, CommandHandler } from "./commands/types.js";
 import { runUninstall } from "./commands/uninstall.js";
@@ -19,6 +21,7 @@ import type { ClaudeAdapter, PiAdapter } from "../core/adapters/index.js";
 export interface CliIo {
   stderr: (message: string) => void;
   stdout: (message: string) => void;
+  stdoutRaw?: (bytes: Uint8Array) => void;
 }
 
 export interface CliOptions {
@@ -34,6 +37,7 @@ export interface CliOptions {
 }
 
 const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
+  cold: runCold,
   config: runConfig,
   doctor: runDoctor,
   help: runHelp,
@@ -41,6 +45,7 @@ const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   memory: runMemory,
   off: runOff,
   on: runOn,
+  recall: runRecall,
   shell: runShell,
   status: runStatus,
   uninstall: runUninstall,
@@ -53,6 +58,9 @@ const DEFAULT_IO: CliIo = {
   },
   stdout: (message) => {
     console.log(message);
+  },
+  stdoutRaw: (bytes) => {
+    process.stdout.write(bytes);
   },
 };
 
@@ -91,6 +99,11 @@ export const runCli = async (
     projectDirectory: options.projectDirectory ?? process.cwd(),
     stderr: io.stderr,
     stdout: io.stdout,
+    stdoutRaw:
+      io.stdoutRaw ??
+      ((bytes) => {
+        process.stdout.write(bytes);
+      }),
     version: options.version,
   });
 };

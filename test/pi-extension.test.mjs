@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -78,6 +78,34 @@ const withTestOwners = async (value, run) => {
   }
 };
 
+const withSzalCliPath = async (value, run) => {
+  const previous = process.env.SZAL_CLI_PATH;
+  process.env.SZAL_CLI_PATH = value;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.SZAL_CLI_PATH;
+    } else {
+      process.env.SZAL_CLI_PATH = previous;
+    }
+  }
+};
+
+const createColdStoreExecutable = ({ exitCode = 0 } = {}) => {
+  const directory = mkdtempSync(join(tmpdir(), "szal-pi-cold-store-"));
+  const capturePath = join(directory, "payload.txt");
+  const argumentsPath = join(directory, "arguments.json");
+  const executablePath = join(directory, "szal-cold-store.js");
+  const coldObjectId = `szal://cold/sha256/${"b".repeat(64)}`;
+  writeFileSync(
+    executablePath,
+    `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nconst chunks = [];\nfor await (const chunk of process.stdin) chunks.push(chunk);\nwriteFileSync(${JSON.stringify(capturePath)}, Buffer.concat(chunks));\nwriteFileSync(${JSON.stringify(argumentsPath)}, JSON.stringify(process.argv.slice(2)));\nprocess.exitCode = ${String(exitCode)};\nif (${String(exitCode)} === 0) process.stdout.write(${JSON.stringify(coldObjectId)} + "\\n");\n`,
+  );
+  chmodSync(executablePath, 0o700);
+  return { argumentsPath, capturePath, coldObjectId, directory, executablePath };
+};
+
 const eventFor = (text) => ({
   content: [{ type: "text", text }],
   input: { command: "printf lots" },
@@ -102,29 +130,69 @@ const branchEntryFor = (message) => ({
   type: "message",
 });
 
-test("Pi extension compresses large enabled text tool results and records measurement", async () => {
+test("Pi extension compresses large enabled text tool results, stores original, and records measurement", async () => {
   const loaded = await loadExtension();
+  const coldStore = createColdStoreExecutable();
   try {
     const { entries, handlers, pi } = createPi();
     loaded.module.default(pi);
     const handler = handlers.get("tool_result");
     const content = `${"line of output\n".repeat(900)}final line`;
 
-    const result = await withEnabled("1", () => handler(eventFor(content), {}));
+    const result = await withSzalCliPath(coldStore.executablePath, () =>
+      withEnabled("1", () => handler(eventFor(content), {})),
+    );
 
+    assert.equal(readFileSync(coldStore.capturePath, "utf8"), content);
+    assert.deepEqual(JSON.parse(readFileSync(coldStore.argumentsPath, "utf8")), [
+      "cold",
+      "store",
+      "--category",
+      "bash",
+      "--source-tool",
+      "bash",
+    ]);
     assert.equal(result.content.length, 1);
     assert.match(result.content[0].text, /szal compressed/);
+    assert.match(result.content[0].text, new RegExp(`szal recall ${coldStore.coldObjectId}`));
     assert.ok(
       Buffer.byteLength(result.content[0].text, "utf8") < Buffer.byteLength(content, "utf8"),
     );
     assert.equal(entries.length, 1);
     assert.equal(entries[0].customType, loaded.module.SZAL_MEASUREMENT_ENTRY_TYPE);
     assert.equal(entries[0].data.category, "bash");
+    assert.equal(entries[0].data.coldObjectId, coldStore.coldObjectId);
     assert.equal(entries[0].data.reasonCode, "compressed");
     assert.ok(entries[0].data.rawBytes > entries[0].data.compressedBytes);
     assert.equal(entries[0].data.failedOpen, false);
   } finally {
     rmSync(loaded.directory, { force: true, recursive: true });
+    rmSync(coldStore.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi extension fails open when original cold storage fails", async () => {
+  const loaded = await loadExtension();
+  const coldStore = createColdStoreExecutable({ exitCode: 2 });
+  try {
+    const { entries, handlers, pi } = createPi();
+    loaded.module.default(pi);
+    const handler = handlers.get("tool_result");
+    const content = `${"line of output\n".repeat(900)}final line`;
+
+    const result = await withSzalCliPath(coldStore.executablePath, () =>
+      withEnabled("1", () => handler(eventFor(content), {})),
+    );
+
+    assert.equal(result, undefined);
+    assert.equal(readFileSync(coldStore.capturePath, "utf8"), content);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].data.reasonCode, "cold-store-error");
+    assert.equal(entries[0].data.rawBytes, entries[0].data.compressedBytes);
+    assert.equal(entries[0].data.failedOpen, true);
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+    rmSync(coldStore.directory, { force: true, recursive: true });
   }
 });
 
@@ -150,15 +218,21 @@ test("Pi extension passes through disabled terminals with equal measurement", as
 
 test("Pi extension fails open if measurement persistence throws", async () => {
   const loaded = await loadExtension();
+  const coldStore = createColdStoreExecutable();
   try {
     const { handlers, pi } = createPi({ appendThrows: true });
     loaded.module.default(pi);
     const handler = handlers.get("tool_result");
     const content = `${"line of output\n".repeat(900)}final line`;
 
-    await assert.doesNotReject(withEnabled("1", () => handler(eventFor(content), {})));
+    await assert.doesNotReject(
+      withSzalCliPath(coldStore.executablePath, () =>
+        withEnabled("1", () => handler(eventFor(content), {})),
+      ),
+    );
   } finally {
     rmSync(loaded.directory, { force: true, recursive: true });
+    rmSync(coldStore.directory, { force: true, recursive: true });
   }
 });
 

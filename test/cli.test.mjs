@@ -44,11 +44,12 @@ const captureCli = async (arguments_, options = {}) => {
 };
 
 // Execute the compiled binary to verify the same interface users invoke after installation.
-const runExecutable = (arguments_, cwd = process.cwd(), environment = process.env) =>
+const runExecutable = (arguments_, cwd = process.cwd(), environment = process.env, input) =>
   spawnSync(process.execPath, [resolve("dist/cli.js"), ...arguments_], {
     cwd,
     encoding: "utf8",
     env: environment,
+    ...(input === undefined ? {} : { input }),
   });
 
 // Capture every repository path and file byte so CLI side effects cannot hide below the root.
@@ -143,6 +144,19 @@ test("memory export retains project and format options for the handler", () => {
   );
 });
 
+test("cold store and recall retain arguments for their handlers", () => {
+  assert.deepEqual(parseArguments(["recall", "szal://cold/sha256/" + "a".repeat(64)]), {
+    arguments_: ["szal://cold/sha256/" + "a".repeat(64)],
+    command: "recall",
+    kind: "command",
+  });
+  assert.deepEqual(parseArguments(["cold", "store", "--category", "bash"]), {
+    arguments_: ["store", "--category", "bash"],
+    command: "cold",
+    kind: "command",
+  });
+});
+
 test("no arguments show help", async () => {
   const result = await captureCli([]);
 
@@ -166,6 +180,51 @@ test("unknown commands fail with a help hint", async () => {
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr.join("\n"), /Unknown command: frobnicate/);
   assert.match(result.stderr.join("\n"), /szal help/);
+});
+
+test("cold store and recall round-trip exact bytes through real CLI processes", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-cold-home-"));
+  const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-cold-project-"));
+  const dataHome = join(homeDirectory, "data");
+  const environment = {
+    ...process.env,
+    HOME: homeDirectory,
+    XDG_DATA_HOME: dataHome,
+  };
+  const payload = "first line\nsecond line without final newline";
+
+  try {
+    const before = snapshotDirectory(projectDirectory);
+    const storeResult = runExecutable(
+      ["cold", "store", "--category", "bash", "--source-tool", "bash"],
+      projectDirectory,
+      environment,
+      payload,
+    );
+
+    assert.equal(storeResult.status, 0, storeResult.stderr);
+    const id = storeResult.stdout.trim();
+    assert.match(id, /^szal:\/\/cold\/sha256\/[a-f0-9]{64}$/);
+
+    const recallResult = runExecutable(["recall", id], projectDirectory, environment);
+    assert.equal(recallResult.status, 0, recallResult.stderr);
+    assert.equal(recallResult.stdout, payload);
+    assert.equal(recallResult.stderr, "");
+
+    const invalidResult = runExecutable(
+      ["recall", "szal://cold/nope"],
+      projectDirectory,
+      environment,
+    );
+    assert.equal(invalidResult.status, 1);
+    assert.match(invalidResult.stderr, /Usage: szal recall/);
+    assert.deepEqual(snapshotDirectory(projectDirectory), before);
+    assert.equal(existsSync(join(dataHome, "szal", "szal.db")), true);
+    assert.equal(existsSync(join(projectDirectory, ".szal")), false);
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+    rmSync(projectDirectory, { force: true, recursive: true });
+  }
 });
 
 test("install aliases dispatch one Claude installer and report restart state", async () => {
