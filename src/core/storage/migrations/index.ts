@@ -4,6 +4,8 @@ import type BetterSqlite3 from "better-sqlite3";
 
 import { INITIAL_SCHEMA_MIGRATION } from "./001-initial-schema.js";
 import { COLD_STORAGE_CLEANUP_AUDIT_MIGRATION } from "./002-cold-storage-cleanup-audit.js";
+import { STRUCTURED_MEMORY_CORE_MIGRATION } from "./003-structured-memory-core.js";
+import { STRUCTURED_MEMORY_SAFEGUARDS_MIGRATION } from "./004-structured-memory-safeguards.js";
 import type { Migration } from "./types.js";
 
 interface AppliedMigration {
@@ -24,6 +26,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 export const MIGRATIONS: readonly Migration[] = [
   INITIAL_SCHEMA_MIGRATION,
   COLD_STORAGE_CLEANUP_AUDIT_MIGRATION,
+  STRUCTURED_MEMORY_CORE_MIGRATION,
+  STRUCTURED_MEMORY_SAFEGUARDS_MIGRATION,
 ];
 
 const calculateChecksum = (migration: Migration): string =>

@@ -474,3 +474,386 @@ test("cold payloads are private, content-addressed, and deduplicated", () => {
     rmSync(homeDirectory, { force: true, recursive: true });
   }
 });
+
+test("structured-memory migration preserves arbitrary v2 rows as unknown", () => {
+  const database = new BetterSqlite3(":memory:");
+  const v2Migrations = MIGRATIONS.slice(0, 2);
+
+  try {
+    applyMigrations(database, v2Migrations);
+    database.exec(`
+      INSERT INTO projects (id, root_path) VALUES
+        ('project-1', '/workspace/one'),
+        ('project-2', '/workspace/two');
+      INSERT INTO sessions (id, project_id, host, mode) VALUES
+        ('other-project-session', 'project-2', 'host', 'on');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri
+      ) VALUES (
+        'legacy-root', 'project-1', 'legacy-class', 'legacy-status', '  exact legacy bytes\n', NULL
+      );
+      INSERT INTO memory_items (
+        id, project_id, session_id, class, status, content, supersedes_id
+      ) VALUES
+        (
+          'legacy-child-a', 'project-1', 'other-project-session', 'anything', 'invalid',
+          'child a', 'legacy-root'
+        ),
+        (
+          'legacy-child-b', 'project-1', NULL, 'anything-else', 'also-invalid',
+          'child b', 'legacy-root'
+        );
+      INSERT INTO decisions (
+        id, project_id, session_id, memory_item_id, decision, reason, rejected,
+        status, source_uri, supersedes_id
+      ) VALUES (
+        'legacy-decision', 'project-1', 'other-project-session', 'legacy-child-a',
+        'legacy decision', ' legacy reason ', 'not this', 'invented', NULL, NULL
+      );
+    `);
+
+    assert.doesNotThrow(() => applyMigrations(database));
+    assert.deepEqual(
+      database
+        .prepare(
+          `SELECT id, class, status, content, session_id, source_uri, supersedes_id, representation
+             FROM memory_items
+            ORDER BY id`,
+        )
+        .all(),
+      [
+        {
+          class: "anything",
+          content: "child a",
+          id: "legacy-child-a",
+          representation: "unknown",
+          session_id: "other-project-session",
+          source_uri: null,
+          status: "invalid",
+          supersedes_id: "legacy-root",
+        },
+        {
+          class: "anything-else",
+          content: "child b",
+          id: "legacy-child-b",
+          representation: "unknown",
+          session_id: null,
+          source_uri: null,
+          status: "also-invalid",
+          supersedes_id: "legacy-root",
+        },
+        {
+          class: "legacy-class",
+          content: "  exact legacy bytes\n",
+          id: "legacy-root",
+          representation: "unknown",
+          session_id: null,
+          source_uri: null,
+          status: "legacy-status",
+          supersedes_id: null,
+        },
+      ],
+    );
+    assert.deepEqual(
+      database.prepare("SELECT decision, reason, rejected, status FROM decisions").get(),
+      {
+        decision: "legacy decision",
+        reason: " legacy reason ",
+        rejected: "not this",
+        status: "invented",
+      },
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            `INSERT INTO memory_items (id, project_id, class, status, content, source_uri)
+             VALUES ('post-v3-unknown', 'project-1', 'task', 'selected', 'new', 'artifact://new')`,
+          )
+          .run(),
+      /representation must be exact or summary/,
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare("UPDATE memory_items SET representation = 'exact' WHERE id = 'legacy-root'")
+          .run(),
+      /unknown memory representation is migration-only/,
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("structured-memory safeguards upgrade the original migration without changing its checksum", () => {
+  const database = new BetterSqlite3(":memory:");
+
+  try {
+    applyMigrations(database, MIGRATIONS.slice(0, 3));
+    database.exec(`
+      INSERT INTO projects (id, root_path) VALUES ('project-1', '/workspace/project-1');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri, representation
+      ) VALUES (
+        'memory-1', 'project-1', 'task', 'selected', 'original', 'artifact://original', 'exact'
+      );
+    `);
+
+    assert.doesNotThrow(() => applyMigrations(database));
+    assert.equal(
+      database.prepare("SELECT COUNT(*) FROM schema_migrations").pluck().get(),
+      MIGRATIONS.length,
+    );
+    assert.throws(
+      () =>
+        database.exec(`
+          INSERT OR REPLACE INTO memory_items (
+            id, project_id, class, status, content, source_uri, representation
+          ) VALUES (
+            'memory-1', 'project-1', 'task', 'selected', 'replacement',
+            'artifact://replacement', 'exact'
+          );
+        `),
+      /memory id already exists/,
+    );
+    assert.equal(
+      database.prepare("SELECT content FROM memory_items WHERE id = 'memory-1'").pluck().get(),
+      "original",
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("structured-memory database invariants protect new rows and decision mirrors", () => {
+  const database = new BetterSqlite3(":memory:");
+  database.pragma("foreign_keys = ON");
+
+  try {
+    applyMigrations(database);
+    database.exec(`
+      INSERT INTO projects (id, root_path) VALUES
+        ('project-1', '/workspace/one'),
+        ('project-2', '/workspace/two');
+      INSERT INTO sessions (id, project_id, host, mode) VALUES
+        ('session-1', 'project-1', 'host', 'on'),
+        ('session-2', 'project-2', 'host', 'on');
+    `);
+    const insertMemory = database.prepare(`
+      INSERT INTO memory_items (
+        id, project_id, session_id, class, status, content, source_uri,
+        supersedes_id, created_at, updated_at, representation
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const values = ({
+      id,
+      projectId = "project-1",
+      sessionId = null,
+      memoryClass = "requirement",
+      status = "selected",
+      content = "content",
+      sourceUri = "artifact://source",
+      supersedesId = null,
+      representation = "exact",
+    }) => [
+      id,
+      projectId,
+      sessionId,
+      memoryClass,
+      status,
+      content,
+      sourceUri,
+      supersedesId,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+      representation,
+    ];
+
+    assert.throws(
+      () => insertMemory.run(...values({ id: "no-source", sourceUri: null })),
+      /requires a source session or artifact URI/,
+    );
+    assert.throws(
+      () =>
+        insertMemory.run(...values({ id: "unknown-representation", representation: "unknown" })),
+      /representation must be exact or summary/,
+    );
+    assert.throws(
+      () => insertMemory.run(...values({ id: "bad-class", memoryClass: "idea" })),
+      /unsupported memory class/,
+    );
+    assert.throws(
+      () => insertMemory.run(...values({ id: "bad-status", status: "active" })),
+      /unsupported memory status/,
+    );
+    assert.throws(
+      () => insertMemory.run(...values({ id: "starts-superseded", status: "superseded" })),
+      /cannot begin as superseded/,
+    );
+    assert.throws(
+      () =>
+        insertMemory.run(
+          ...values({ id: "cross-project-session", sessionId: "session-2", sourceUri: null }),
+        ),
+      /session must belong to its project/,
+    );
+
+    insertMemory.run(...values({ id: "predecessor", sessionId: "session-1" }));
+    assert.throws(
+      () =>
+        database
+          .prepare("UPDATE sessions SET project_id = 'project-2' WHERE id = 'session-1'")
+          .run(),
+      /source session must remain in its project/,
+    );
+    assert.throws(
+      () =>
+        insertMemory.run(
+          ...values({
+            id: "cross-project-successor",
+            projectId: "project-2",
+            supersedesId: "predecessor",
+          }),
+        ),
+      /predecessor must belong to the same project/,
+    );
+    insertMemory.run(...values({ id: "successor", supersedesId: "predecessor" }));
+    assert.equal(
+      database.prepare("SELECT status FROM memory_items WHERE id = 'predecessor'").pluck().get(),
+      "superseded",
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            `
+            INSERT OR REPLACE INTO memory_items (
+              id, project_id, session_id, class, status, content, source_uri,
+              supersedes_id, created_at, updated_at, representation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          )
+          .run(...values({ content: "replaced", id: "successor" })),
+      /memory id already exists/,
+    );
+    assert.equal(
+      database.prepare("SELECT content FROM memory_items WHERE id = 'successor'").pluck().get(),
+      "content",
+    );
+    assert.throws(
+      () => insertMemory.run(...values({ id: "second-successor", supersedesId: "predecessor" })),
+      /already superseded|already has a successor/,
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare("UPDATE memory_items SET content = 'changed' WHERE id = 'successor'")
+          .run(),
+      /identity, content, and provenance are immutable/,
+    );
+    assert.throws(
+      () => database.prepare("DELETE FROM memory_items WHERE id = 'successor'").run(),
+      /append-only/,
+    );
+
+    insertMemory.run(
+      ...values({ id: "decision-1", memoryClass: "decision", sessionId: "session-1" }),
+    );
+    const insertDecision = database.prepare(`
+      INSERT INTO decisions (
+        id, project_id, session_id, memory_item_id, decision, reason, rejected,
+        status, source_uri, supersedes_id, decided_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    assert.throws(
+      () =>
+        insertDecision.run(
+          "decision-1",
+          "project-1",
+          "session-1",
+          "decision-1",
+          "different content",
+          "reason",
+          "rejected",
+          "selected",
+          "artifact://source",
+          null,
+          "2026-01-01T00:00:00.000Z",
+        ),
+      /must mirror its memory item/,
+    );
+    insertDecision.run(
+      "decision-1",
+      "project-1",
+      "session-1",
+      "decision-1",
+      "content",
+      " exact reason ",
+      "not another",
+      "selected",
+      "artifact://source",
+      null,
+      "2026-01-01T00:00:00.000Z",
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            `
+            INSERT OR REPLACE INTO decisions (
+              id, project_id, session_id, memory_item_id, decision, reason, rejected,
+              status, source_uri, supersedes_id, decided_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          )
+          .run(
+            "decision-1",
+            "project-1",
+            "session-1",
+            "decision-1",
+            "replacement",
+            "replacement reason",
+            "replacement rejection",
+            "selected",
+            "artifact://source",
+            null,
+            "2026-01-01T00:00:00.000Z",
+          ),
+      /decision id already exists/,
+    );
+    assert.equal(
+      database.prepare("SELECT decision FROM decisions WHERE id = 'decision-1'").pluck().get(),
+      "content",
+    );
+    assert.throws(
+      () => database.prepare("UPDATE decisions SET reason = 'changed'").run(),
+      /identity, content, and provenance are immutable/,
+    );
+    assert.throws(
+      () => database.prepare("DELETE FROM decisions WHERE id = 'decision-1'").run(),
+      /append-only/,
+    );
+    assert.deepEqual(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_master
+            WHERE type = 'index'
+              AND name IN (
+                'memory_items_project_archive_idx',
+                'memory_items_supersedes_idx',
+                'memory_items_structured_single_successor_idx'
+              )
+            ORDER BY name`,
+        )
+        .pluck()
+        .all(),
+      [
+        "memory_items_project_archive_idx",
+        "memory_items_structured_single_successor_idx",
+        "memory_items_supersedes_idx",
+      ],
+    );
+  } finally {
+    database.close();
+  }
+});

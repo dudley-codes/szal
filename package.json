@@ -11,6 +11,10 @@
       "types": "./dist/core/adapters/index.d.ts",
       "import": "./dist/core/adapters/index.js"
     },
+    "./memory": {
+      "types": "./dist/core/memory/index.d.ts",
+      "import": "./dist/core/memory/index.js"
+    },
     "./ownership": {
       "types": "./dist/core/compression/index.d.ts",
       "import": "./dist/core/compression/index.js"
