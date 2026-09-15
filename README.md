@@ -262,6 +262,41 @@ capability as `required` or `optional`. Limitations use stable issue codes so do
 services can consume results without parsing presentation text. A missing optional engine must
 return unavailable results instead of preventing other adapters from being inspected.
 
+### Host parity contract
+
+Host integrations expose user-visible guarantees through `szal/integration`, separately from the
+mechanism-level capabilities above. Every MVP host reports the same ordered capabilities:
+reversible install, automatic compression, fail-open operation, terminal-local control, local
+telemetry, exact cold storage, explicit recall, structured memory, diagnostics, a runtime indicator,
+and project isolation.
+
+The shared state vocabulary is:
+
+| State         | Meaning                                                                |
+| ------------- | ---------------------------------------------------------------------- |
+| `active`      | The guarantee is supported, configured, and currently effective.       |
+| `inactive`    | It is known but is not installed, enabled, or engaged.                 |
+| `degraded`    | It is partial or unverified while safe pass-through remains available. |
+| `unsupported` | The detected host, version, or policy cannot provide it.               |
+| `failed`      | An expected inspection or operation encountered a failure.             |
+
+Adapters provide typed evidence; the shared resolver orders and validates it without reading or
+writing host configuration. Missing or duplicate required evidence fails that host's contract.
+Optional or unknown evidence is reported as degraded without preventing unrelated hosts from being
+inspected. Adapter availability never becomes `active` implicitly: unavailable results must be
+classified explicitly as inactive, unsupported, or failed. Stable issues use the same code,
+message, remediation, and retryability shape across hosts.
+
+Command semantics remain host-neutral: `szal install <host>` and `szal uninstall <host>` manage an
+integration, `szal on` and `szal off` control only the current terminal, and status, stats, doctor,
+and recall are common core commands. Different hosts may satisfy the contract through different
+verified mechanisms, but adapters do not get host-specific command aliases and core services do not
+receive host configuration writers.
+
+CLI status uses the same states, so OFF is `inactive` rather than `disabled` while compression is in
+pass-through and telemetry remains active. Doctor JSON schema version 2 likewise uses `active`,
+`degraded`, and `failed` for its current aggregate result.
+
 ### llmtrim engine
 
 The llmtrim adapter uses the upstream CLI's scriptable surfaces: `--version`, `status --json`,

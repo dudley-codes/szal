@@ -659,6 +659,8 @@ test("doctor reports active ownership by content category without modifying the 
 
     assert.equal(result.status, 0, result.stderr);
     const report = JSON.parse(result.stdout);
+    assert.equal(report.schemaVersion, 2);
+    assert.equal(report.status, "degraded");
     assert.equal(report.engines.squeez.status, "available");
     assert.equal(report.engines.squeez.version, "1.46.0");
     assert.equal(

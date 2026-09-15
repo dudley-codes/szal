@@ -1,7 +1,9 @@
+import type { HostIntegrationState } from "../integration/index.js";
+
 export const SZAL_ENABLED_VARIABLE = "SZAL_ENABLED";
 export const SZAL_TERMINAL_ID_VARIABLE = "SZAL_TERMINAL_ID";
 
-export type CapabilityState = "active" | "disabled" | "degraded";
+export type CapabilityState = HostIntegrationState;
 export type TerminalMode = "on" | "off";
 export type TerminalStateSource = "default" | "environment" | "override";
 
@@ -35,7 +37,7 @@ export const resolveTerminalState = (
 
   if (override !== undefined) {
     return {
-      capability: override === "on" ? "active" : "disabled",
+      capability: override === "on" ? "active" : "inactive",
       detail: `explicit ${override.toUpperCase()} override`,
       enabled: override === "on",
       mode: override,
@@ -48,7 +50,7 @@ export const resolveTerminalState = (
   if (configuredValue === "1" || configuredValue === "0") {
     const enabled = configuredValue === "1";
     return {
-      capability: enabled ? "active" : "disabled",
+      capability: enabled ? "active" : "inactive",
       detail: `${SZAL_ENABLED_VARIABLE}=${configuredValue}`,
       enabled,
       mode: enabled ? "on" : "off",
@@ -69,7 +71,7 @@ export const resolveTerminalState = (
   }
 
   return {
-    capability: "disabled",
+    capability: "inactive",
     detail: `${SZAL_ENABLED_VARIABLE} is unset; using safe pass-through`,
     enabled: false,
     mode: "off",
