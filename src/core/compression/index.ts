@@ -12,3 +12,19 @@ export {
   type OwnershipIssue,
   type PreservationField,
 } from "./ownership.js";
+export {
+  DEFAULT_COMPRESSION_POLICY,
+  estimateCompressionTokens,
+  executeCompression,
+  resolveRuntimeOwner,
+  shouldCompress,
+  type CompressionDecision,
+  type CompressionDecisionAction,
+  type CompressionDecisionReasonCode,
+  type CompressionExecutionResult,
+  type CompressionFunction,
+  type CompressionMeasurement,
+  type CompressionPolicy,
+  type CompressionRuntimeOwner,
+  type CompressionSliceInput,
+} from "./orchestration.js";
