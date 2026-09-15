@@ -139,6 +139,38 @@ const isCommandHook = (
 ): value is Record<string, unknown> & { command: string; type: "command" } =>
   isJsonRecord(value) && value.type === "command" && typeof value.command === "string";
 
+const commandStringReferencesManagedPath = (value: string, managedPath: string): boolean => {
+  const normalizedValue = value.replaceAll("\\", "/");
+  const normalizedManagedPath = managedPath.replaceAll("\\", "/");
+  return normalizedValue.includes(normalizedManagedPath);
+};
+
+const handlerReferencesRegistrationManagedPath = (
+  handler: unknown,
+  registration: ClaudeHookRegistration,
+): boolean => {
+  if (!isCommandHook(handler)) {
+    return false;
+  }
+  const managedPath = registration.handler.command;
+  return (
+    commandStringReferencesManagedPath(handler.command, managedPath) ||
+    (Array.isArray(handler.args) &&
+      handler.args.some(
+        (argument) =>
+          typeof argument === "string" && commandStringReferencesManagedPath(argument, managedPath),
+      ))
+  );
+};
+
+export const claudeHookReferencesManagedPath = (
+  hook: ClaudeHookRegistration,
+  knownHooks: readonly ClaudeHookRegistration[],
+): boolean =>
+  knownHooks.some((registration) =>
+    handlerReferencesRegistrationManagedPath(hook.handler, registration),
+  );
+
 const matchesRegistration = (
   event: ClaudeHookEvent,
   matcher: string,
@@ -252,8 +284,10 @@ const reconcileHookEvent = (
     const parsed = parseHookGroup(value, event, index);
     const retained = parsed.handlers.filter(
       (handler) =>
-        !knownHooks.some((registration) =>
-          matchesRegistration(event, parsed.matcher, handler, registration),
+        !knownHooks.some(
+          (registration) =>
+            matchesRegistration(event, parsed.matcher, handler, registration) ||
+            handlerReferencesRegistrationManagedPath(handler, registration),
         ),
     );
     const onlyStructuralFields = Object.keys(parsed.group).every(

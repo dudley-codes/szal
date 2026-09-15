@@ -147,19 +147,44 @@ const createBackup = (snapshot: FileSnapshot, now: () => Date): string => {
   throw new Error(`Unable to allocate a unique backup for ${snapshot.logicalPath}.`);
 };
 
-const matchesOriginal = (snapshot: FileSnapshot): boolean => {
+const targetMatches = (snapshot: FileSnapshot, contents: Buffer, mode?: number): boolean =>
+  existsSync(snapshot.targetPath) &&
+  readFileSync(snapshot.targetPath).equals(contents) &&
+  (mode === undefined || (statSync(snapshot.targetPath).mode & 0o777) === mode);
+
+const targetMatchesOriginal = (snapshot: FileSnapshot): boolean => {
   if (!existsSync(snapshot.targetPath)) {
     return !snapshot.existed;
   }
-  return (
-    snapshot.existed &&
-    readFileSync(snapshot.targetPath).equals(snapshot.original) &&
-    (statSync(snapshot.targetPath).mode & 0o777) === snapshot.originalMode
-  );
+  return snapshot.existed && targetMatches(snapshot, snapshot.original, snapshot.originalMode);
+};
+
+const claimedFileMatches = (snapshot: FileSnapshot, contents: Buffer, mode?: number): boolean =>
+  resolveWriteTarget(snapshot.logicalPath) === snapshot.targetPath &&
+  targetMatches(snapshot, contents, mode);
+
+const claimedFileMatchesOriginal = (snapshot: FileSnapshot): boolean =>
+  resolveWriteTarget(snapshot.logicalPath) === snapshot.targetPath &&
+  targetMatchesOriginal(snapshot);
+
+const assertClaimedFileMatches = (snapshot: FileSnapshot, contents: Buffer): void => {
+  if (!claimedFileMatches(snapshot, contents)) {
+    throw new Error(
+      `Refusing to overwrite ${snapshot.logicalPath} because it changed during installation.`,
+    );
+  }
+};
+
+const assertCurrentMatchesSnapshot = (snapshot: FileSnapshot): void => {
+  if (!claimedFileMatchesOriginal(snapshot)) {
+    throw new Error(
+      `Refusing to overwrite ${snapshot.logicalPath} because it changed during installation.`,
+    );
+  }
 };
 
 const currentMatchesSnapshot = (snapshot: FileSnapshot): boolean =>
-  resolveWriteTarget(snapshot.logicalPath) === snapshot.targetPath && matchesOriginal(snapshot);
+  claimedFileMatchesOriginal(snapshot);
 
 // Write, fsync, validate, and atomically rename a private same-directory temporary file.
 const writeAtomic = (
@@ -167,6 +192,7 @@ const writeAtomic = (
   contents: Buffer,
   mode: number,
   validate?: (temporaryPath: string) => string | null,
+  beforePublish?: () => void,
 ): void => {
   mkdirSync(dirname(targetPath), { mode: 0o700, recursive: true });
   const temporaryPath = join(
@@ -185,6 +211,7 @@ const writeAtomic = (
     if (validationError !== null) {
       throw new Error(`Validation failed for ${targetPath}: ${validationError}`);
     }
+    beforePublish?.();
     renameSync(temporaryPath, targetPath);
     chmodSync(targetPath, mode);
   } finally {
@@ -200,22 +227,28 @@ const restoreSnapshots = (snapshots: readonly FileSnapshot[]): boolean => {
   let restored = true;
   for (const snapshot of [...snapshots].reverse()) {
     try {
-      if (matchesOriginal(snapshot)) {
+      if (claimedFileMatchesOriginal(snapshot)) {
         continue;
       }
-      if (
-        !existsSync(snapshot.targetPath) ||
-        !readFileSync(snapshot.targetPath).equals(snapshot.candidate)
-      ) {
+      if (!claimedFileMatches(snapshot, snapshot.candidate)) {
         restored = false;
         continue;
       }
       if (snapshot.existed) {
-        writeAtomic(snapshot.targetPath, snapshot.original, snapshot.originalMode);
+        writeAtomic(
+          snapshot.targetPath,
+          snapshot.original,
+          snapshot.originalMode,
+          undefined,
+          () => {
+            assertClaimedFileMatches(snapshot, snapshot.candidate);
+          },
+        );
       } else {
+        assertClaimedFileMatches(snapshot, snapshot.candidate);
         rmSync(snapshot.targetPath, { force: true });
       }
-      restored = matchesOriginal(snapshot) && restored;
+      restored = claimedFileMatchesOriginal(snapshot) && restored;
     } catch {
       restored = false;
     }
@@ -225,14 +258,20 @@ const restoreSnapshots = (snapshots: readonly FileSnapshot[]): boolean => {
 
 // Convert all preflight failures into a transaction result with no mutation to compensate.
 const prepareSnapshots = (changes: readonly ManagedFile[]): readonly FileSnapshot[] => {
+  const snapshots: FileSnapshot[] = [];
   try {
-    return changes
-      .map((change) => snapshotFile(change))
-      .filter((snapshot): snapshot is FileSnapshot => snapshot !== undefined);
+    for (const change of changes) {
+      const snapshot = snapshotFile(change);
+      if (snapshot !== undefined) {
+        snapshots.push(snapshot);
+      }
+    }
+    return snapshots;
   } catch (error) {
+    const rolledBack = restoreSnapshots(snapshots);
     throw new FileTransactionError(
       error instanceof Error ? error.message : String(error),
-      true,
+      rolledBack,
       [],
       { cause: error },
     );
@@ -258,7 +297,9 @@ export const commitFileTransaction = (
       }
       backupPaths.push(createBackup(snapshot, now));
       committed.push(snapshot);
-      writeAtomic(snapshot.targetPath, snapshot.candidate, snapshot.mode, snapshot.validate);
+      writeAtomic(snapshot.targetPath, snapshot.candidate, snapshot.mode, snapshot.validate, () => {
+        assertCurrentMatchesSnapshot(snapshot);
+      });
     }
   } catch (error) {
     const rolledBack = restoreSnapshots(committed);

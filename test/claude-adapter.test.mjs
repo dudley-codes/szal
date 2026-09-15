@@ -450,6 +450,41 @@ test("future Claude schemas fail closed while version reporting remains availabl
   assert.ok(readFileSync(fixture.settingsPath).equals(before));
 });
 
+test("Claude settings with llmtrim transport but missing environment state fail before mutation", async () => {
+  const fixture = createFixture();
+  writeFileSync(
+    fixture.settingsPath,
+    `${JSON.stringify({
+      env: {
+        HTTP_PROXY: "http://127.0.0.1:7788",
+        HTTPS_PROXY: "http://127.0.0.1:7788",
+        NODE_EXTRA_CA_CERTS: join(fixture.homeDirectory, ".llmtrim", "ca.pem"),
+        NODE_USE_ENV_PROXY: "1",
+        SZAL_LLMTRIM_DAEMON_CONFIGURATION: JSON.stringify({
+          enableRecovery: true,
+          pid: 123,
+          preset: "auto",
+          version: 1,
+        }),
+      },
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const before = readFileSync(fixture.settingsPath);
+  const fake = createFakeLlmtrim();
+  const adapter = createAdapter(fake.adapter);
+
+  const result = await adapter.install(fixture.context, {
+    config: structuredClone(DEFAULT_CONFIG),
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.changed, false);
+  assert.equal(result.rolledBack, true);
+  assert.equal(result.issue.code, "claude-llmtrim-environment-state-missing");
+  assert.ok(readFileSync(fixture.settingsPath).equals(before));
+});
+
 test("malformed settings and unmanaged squeez hooks fail before mutation", async () => {
   const malformed = createFixture({ settings: '{"hooks":{"PreToolUse":{}}}\n' });
   const malformedBefore = readFileSync(malformed.settingsPath);

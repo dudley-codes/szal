@@ -91,6 +91,36 @@ test("Claude settings preserve unrelated fields and patch only exact owned tuple
   assert.ok(commands.some((entry) => entry.matcher === ""));
 });
 
+test("Claude settings remove owned hook paths embedded in command strings and args", () => {
+  const root = "/private/claude/szal/hooks";
+  const owned = registration(root, "PreToolUse", "^Bash$", "squeez-pretooluse.sh");
+  const original = {
+    hooks: {
+      PreToolUse: [
+        {
+          hooks: [
+            { command: `/bin/bash ${owned.handler.command}`, type: "command" },
+            { args: ["-n", owned.handler.command], command: "/bin/bash", type: "command" },
+            { command: "/user/hook", type: "command" },
+          ],
+          matcher: "^Bash$",
+        },
+      ],
+    },
+  };
+
+  const patched = patchClaudeSettings(original, {
+    desiredHooks: [],
+    environment: {},
+    knownHooks: [owned],
+    managedEnvironmentKeys: [],
+  });
+
+  assert.deepEqual(patched.hooks.PreToolUse, [
+    { hooks: [{ command: "/user/hook", type: "command" }], matcher: "^Bash$" },
+  ]);
+});
+
 test("Claude settings reject unsafe hook and environment shapes", () => {
   assert.throws(
     () =>
@@ -192,6 +222,41 @@ test("a later validation failure restores every previously committed file byte-f
     readdirSync(root).filter((name) => name.includes(".tmp")),
     [],
   );
+});
+
+test("symlink retargeting at publish time is rejected without overwriting the stale target", () => {
+  const root = temporaryDirectory("szal-claude-symlink-race-");
+  const firstTarget = join(root, "first-settings.json");
+  const secondTarget = join(root, "second-settings.json");
+  const link = join(root, "settings.json");
+  writeFileSync(firstTarget, "first-before\n", { mode: 0o600 });
+  writeFileSync(secondTarget, "second-before\n", { mode: 0o600 });
+  symlinkSync(firstTarget, link);
+
+  assert.throws(
+    () =>
+      commitFileTransaction([
+        {
+          contents: Buffer.from("installed\n"),
+          mode: 0o600,
+          path: link,
+          validate: () => {
+            rmSync(link);
+            symlinkSync(secondTarget, link);
+            return null;
+          },
+        },
+      ]),
+    (error) => {
+      assert.ok(error instanceof FileTransactionError);
+      assert.equal(error.rolledBack, false);
+      return true;
+    },
+  );
+
+  assert.equal(readFileSync(firstTarget, "utf8"), "first-before\n");
+  assert.equal(readFileSync(secondTarget, "utf8"), "second-before\n");
+  assert.equal(readFileSync(link, "utf8"), "second-before\n");
 });
 
 test("rollback refuses to overwrite a concurrent user edit", () => {
