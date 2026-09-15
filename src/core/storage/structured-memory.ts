@@ -599,8 +599,15 @@ const readProjectDecisions = (
                 SELECT 1
                   FROM memory_items AS successor
                  WHERE successor.supersedes_id = memory_items.id
+                   AND successor.project_id = memory_items.project_id
               )
          )
+       )
+       AND NOT EXISTS (
+         SELECT 1
+           FROM decisions AS successor
+          WHERE successor.supersedes_id = decisions.id
+            AND successor.project_id = decisions.project_id
        )`
     : "";
   return (
@@ -640,6 +647,7 @@ const readCurrentMemory = (
                 SELECT 1
                   FROM memory_items AS successor
                  WHERE successor.supersedes_id = memory_items.id
+                   AND successor.project_id = memory_items.project_id
               )
               ${representationFilter}
             ORDER BY created_at DESC, id DESC
@@ -682,6 +690,7 @@ export const readMemoryArchive = (
            SELECT 1
              FROM memory_items AS successor
             WHERE successor.supersedes_id = memory_items.id
+              AND successor.project_id = memory_items.project_id
          )`
       : "";
   const items = (

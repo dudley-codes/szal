@@ -540,17 +540,36 @@ test("legacy cross-project decision links cannot enter structured supersession",
         ('project-1', '/workspace/project-1'),
         ('project-2', '/workspace/project-2');
       INSERT INTO memory_items (
-        id, project_id, class, status, content, source_uri, created_at, updated_at
-      ) VALUES (
-        'legacy-memory-id', 'project-1', 'decision', 'selected', 'legacy choice',
-        'artifact://legacy', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
-      );
+        id, project_id, class, status, content, source_uri, supersedes_id,
+        created_at, updated_at
+      ) VALUES
+        (
+          'legacy-memory-id', 'project-1', 'decision', 'selected', 'legacy choice',
+          'artifact://legacy', NULL, '2026-01-01T00:00:00.000Z',
+          '2026-01-01T00:00:00.000Z'
+        ),
+        (
+          'cross-project-memory-successor', 'project-2', 'decision', 'selected',
+          'unrelated project choice', 'artifact://other', 'legacy-memory-id',
+          '2026-01-01T00:00:01.000Z', '2026-01-01T00:00:01.000Z'
+        );
       INSERT INTO decisions (
         id, project_id, memory_item_id, decision, status, source_uri, decided_at
       ) VALUES (
         'cross-project-decision', 'project-2', 'legacy-memory-id', 'legacy choice',
         'selected', 'artifact://legacy', '2026-01-01T00:00:00.000Z'
       );
+      INSERT INTO decisions (
+        id, project_id, decision, status, source_uri, supersedes_id, decided_at
+      ) VALUES
+        (
+          'standalone-old', 'project-1', 'standalone old', 'selected',
+          'artifact://standalone-old', NULL, '2026-01-01T00:00:02.000Z'
+        ),
+        (
+          'standalone-new', 'project-1', 'standalone new', 'selected',
+          'artifact://standalone-new', 'standalone-old', '2026-01-01T00:00:03.000Z'
+        );
     `);
     applyMigrations(database);
 
@@ -576,7 +595,24 @@ test("legacy cross-project decision links cannot enter structured supersession",
         .get(),
       "selected",
     );
-    assert.equal(database.prepare("SELECT COUNT(*) FROM memory_items").pluck().get(), 1);
+    assert.equal(database.prepare("SELECT COUNT(*) FROM memory_items").pluck().get(), 2);
+    assert.deepEqual(
+      readWorking(database, "project-1").items.map(({ id }) => id),
+      ["legacy-memory-id"],
+    );
+    const current = readMemoryArchive(database, "project-1", { currentOnly: true });
+    assert.deepEqual(
+      current.items.map(({ id }) => id),
+      ["legacy-memory-id"],
+    );
+    assert.deepEqual(
+      current.decisions.map(({ id }) => id),
+      ["standalone-new"],
+    );
+    assert.deepEqual(
+      readMemoryArchive(database, "project-1").decisions.map(({ id }) => id),
+      ["standalone-old", "standalone-new"],
+    );
   } finally {
     database.close();
   }
