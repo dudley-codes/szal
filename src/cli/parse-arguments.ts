@@ -8,6 +8,7 @@ export type CliCommandName =
   | "on"
   | "shell"
   | "status"
+  | "uninstall"
   | "version";
 
 export type ParsedArguments =
@@ -32,6 +33,7 @@ const COMMAND_ALIASES: ReadonlyMap<string, CliCommandName> = new Map([
   ["--on", "on"],
   ["-on", "on"],
   ["status", "status"],
+  ["uninstall", "uninstall"],
   ["version", "version"],
   ["--version", "version"],
   ["-v", "version"],

@@ -23,6 +23,17 @@ export {
   type StagedSqueezHooks,
 } from "./claude.js";
 export {
+  PI_EXTENSION_OWNERSHIP_MARKER,
+  createPiAdapter,
+  type PiAdapter,
+  type PiAdapterOptions,
+  type PiCommandInvocation,
+  type PiCommandResult,
+  type PiCommandRunner,
+  type PiDetectionDetails,
+  type PiInstallDetails,
+} from "./pi.js";
+export {
   COMPRESSION_ENGINE_CAPABILITIES,
   type CompressionEngineAdapter,
   type CompressionEngineCapabilityName,

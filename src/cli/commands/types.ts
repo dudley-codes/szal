@@ -1,4 +1,4 @@
-import type { AdapterContext, ClaudeAdapter } from "../../core/adapters/index.js";
+import type { AdapterContext, ClaudeAdapter, PiAdapter } from "../../core/adapters/index.js";
 import type { CompressionEngineState } from "../../core/compression/index.js";
 import type { CapabilityState } from "../../core/terminal/index.js";
 
@@ -14,6 +14,7 @@ export interface CommandContext extends AdapterContext {
   claudeAdapter?: Pick<ClaudeAdapter, "install">;
   compressionEngines?: readonly CompressionEngineState[];
   engine?: CliComponentStatus;
+  piAdapter?: Partial<Pick<PiAdapter, "disable" | "install">>;
   projectDirectory: string;
   stderr: (message: string) => void;
   stdout: (message: string) => void;

@@ -15,6 +15,8 @@ Commands:
   doctor                      Report engine and compression ownership health
   memory export               Export external structured memory
   install claude              Install the Claude Code integration safely
+  install pi                  Install the global Pi extension
+  uninstall pi                Remove the global Pi extension
   on                          Enable compression in this terminal
   off                         Use pass-through compression in this terminal
   shell                       Manage bash/zsh shell integration

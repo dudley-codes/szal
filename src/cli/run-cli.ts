@@ -10,10 +10,11 @@ import { runShell } from "./commands/shell.js";
 import { runOff, runOn } from "./commands/terminal-state.js";
 import { runStatus } from "./commands/status.js";
 import type { CliComponentStatus, CommandHandler } from "./commands/types.js";
+import { runUninstall } from "./commands/uninstall.js";
 import { runVersion } from "./commands/version.js";
 import { parseArguments, type CliCommandName } from "./parse-arguments.js";
 import type { CompressionEngineState } from "../core/compression/index.js";
-import type { ClaudeAdapter } from "../core/adapters/index.js";
+import type { ClaudeAdapter, PiAdapter } from "../core/adapters/index.js";
 
 export interface CliIo {
   stderr: (message: string) => void;
@@ -27,6 +28,7 @@ export interface CliOptions {
   engine?: CliComponentStatus;
   environment?: Readonly<Record<string, string | undefined>>;
   homeDirectory?: string;
+  piAdapter?: Partial<Pick<PiAdapter, "disable" | "install">>;
   projectDirectory?: string;
   version: string;
 }
@@ -41,6 +43,7 @@ const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   on: runOn,
   shell: runShell,
   status: runStatus,
+  uninstall: runUninstall,
   version: runVersion,
 };
 
@@ -82,6 +85,7 @@ export const runCli = async (
       ? {}
       : { compressionEngines: options.compressionEngines }),
     ...(options.engine === undefined ? {} : { engine: options.engine }),
+    ...(options.piAdapter === undefined ? {} : { piAdapter: options.piAdapter }),
     environment,
     homeDirectory,
     projectDirectory: options.projectDirectory ?? process.cwd(),

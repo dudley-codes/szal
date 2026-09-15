@@ -21,7 +21,7 @@ export default defineConfig(
   },
   {
     extends: [typescriptEslint.configs.disableTypeChecked],
-    files: ["**/*.js", "**/*.mjs"],
+    files: ["resources/**/*.ts", "**/*.js", "**/*.mjs"],
     languageOptions: {
       globals: globals.node,
     },
