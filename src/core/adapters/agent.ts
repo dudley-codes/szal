@@ -1,3 +1,4 @@
+import type { HostIntegrationProvider } from "../integration/index.js";
 import type {
   AdapterContext,
   AdapterDescriptor,
@@ -43,3 +44,19 @@ export interface AgentAdapter<
   install: (context: AdapterContext, request: InstallRequest) => Promise<AdapterOperationResult>;
   version: (context: AdapterContext) => Promise<AdapterVersion>;
 }
+
+// Host integrations add user-visible parity evidence without replacing mechanism-level capabilities.
+export type ConformingAgentAdapter<
+  InstallRequest = unknown,
+  ConfigureRequest = unknown,
+  DetectionDetails = unknown,
+  CapabilityName extends string = AgentCapabilityName,
+  CapabilityDetails = unknown,
+> = AgentAdapter<
+  InstallRequest,
+  ConfigureRequest,
+  DetectionDetails,
+  CapabilityName,
+  CapabilityDetails
+> &
+  HostIntegrationProvider;

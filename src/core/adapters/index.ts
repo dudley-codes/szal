@@ -1,4 +1,9 @@
-export { AGENT_CAPABILITIES, type AgentAdapter, type AgentCapabilityName } from "./agent.js";
+export {
+  AGENT_CAPABILITIES,
+  type AgentAdapter,
+  type AgentCapabilityName,
+  type ConformingAgentAdapter,
+} from "./agent.js";
 export {
   createClaudeAdapter,
   type ClaudeAdapter,

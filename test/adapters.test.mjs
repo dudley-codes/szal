@@ -5,6 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  assertHostIntegrationConformance,
+  parityEvidence,
+} from "./fixtures/host-integration-contract.mjs";
+import {
   MINIMUM_SAFE_SQUEEZ_VERSION,
   availableCapability,
   createSqueezAdapter,
@@ -73,11 +77,17 @@ test("an agent adapter implements the complete lifecycle contract", async () => 
       status: "degraded",
     }),
     install: async () => ({ changed: true, requiresRestart: true, status: "succeeded" }),
+    integration: async () => ({ capabilities: parityEvidence({ mechanism: "representative" }) }),
     configure: async () => ({ changed: false, requiresRestart: false, status: "succeeded" }),
     disable: async () => ({ changed: true, requiresRestart: true, status: "succeeded" }),
   };
 
   await runAgentContract(agent);
+  const report = await assertHostIntegrationConformance(agent, {
+    environment: {},
+    homeDirectory: "/home/tester",
+  });
+  assert.equal(report.state, "active");
 });
 
 test("an unavailable optional engine does not block an available engine", async () => {

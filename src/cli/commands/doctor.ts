@@ -6,6 +6,7 @@ import {
   type CompressionOwnershipPlan,
 } from "../../core/compression/index.js";
 import { ConfigError, loadConfig } from "../../core/config/index.js";
+import type { HostIntegrationState } from "../../core/integration/index.js";
 import type { CommandContext, CommandHandler } from "./types.js";
 
 const DOCTOR_USAGE = "Usage: szal doctor [--json]";
@@ -31,11 +32,13 @@ const mergeEngineStates = (
   return [...engines.values()];
 };
 
-const doctorStatus = (plan: CompressionOwnershipPlan): "degraded" | "failed" | "healthy" => {
+const doctorStatus = (
+  plan: CompressionOwnershipPlan,
+): Extract<HostIntegrationState, "active" | "degraded" | "failed"> => {
   if (plan.issues.some((issue) => issue.severity === "error")) {
     return "failed";
   }
-  return plan.issues.length > 0 ? "degraded" : "healthy";
+  return plan.issues.length > 0 ? "degraded" : "active";
 };
 
 const renderHumanReport = (
@@ -112,7 +115,7 @@ export const runDoctor: CommandHandler = (context) => {
             ownership: plan.assignments,
             preservation: REQUIRED_PRESERVATION_FIELDS,
             profile: plan.profile,
-            schemaVersion: 1,
+            schemaVersion: 2,
             status,
           },
           null,

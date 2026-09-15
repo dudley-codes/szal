@@ -110,7 +110,7 @@ test("explicit state overrides support non-interactive usage without changing th
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout.join("\n"), /Terminal state: ACTIVE - explicit ON override/);
   assert.match(result.stdout.join("\n"), /Terminal ID: ci-terminal/);
-  assert.match(splitResult.stdout.join("\n"), /Terminal state: DISABLED - explicit OFF override/);
+  assert.match(splitResult.stdout.join("\n"), /Terminal state: INACTIVE - explicit OFF override/);
   assert.equal(environment.SZAL_ENABLED, "0");
 });
 
@@ -130,6 +130,19 @@ test("status reports project and active agent and engine capabilities", async ()
   assert.match(output, /Telemetry: ACTIVE/);
 });
 
+test("status renders unsupported and failed integration states without changing semantics", async () => {
+  for (const state of ["unsupported", "failed"]) {
+    const result = await captureCli(["status"], {
+      agent: { name: "Representative host", state },
+      engine: { name: "Representative engine", state },
+      environment: { SZAL_ENABLED: "1" },
+    });
+
+    assert.match(result.stdout.join("\n"), new RegExp(`Agent: ${state.toUpperCase()}`));
+    assert.match(result.stdout.join("\n"), new RegExp(`Engine: ${state.toUpperCase()}`));
+  }
+});
+
 test("OFF status is pass-through while telemetry and shared capabilities remain available", async () => {
   const result = await captureCli(["status"], {
     agent: { name: "Claude Code", state: "active" },
@@ -138,9 +151,9 @@ test("OFF status is pass-through while telemetry and shared capabilities remain 
   });
   const output = result.stdout.join("\n");
 
-  assert.match(output, /Terminal state: DISABLED/);
+  assert.match(output, /Terminal state: INACTIVE/);
   assert.match(output, /Agent: ACTIVE - Claude Code/);
-  assert.match(output, /Engine: DISABLED - llmtrim \(compression pass-through for this terminal\)/);
+  assert.match(output, /Engine: INACTIVE - llmtrim \(compression pass-through for this terminal\)/);
   assert.match(output, /Telemetry: ACTIVE - baseline measurement remains enabled/);
 });
 
@@ -153,7 +166,7 @@ test("invalid terminal state degrades safely instead of enabling compression", a
     telemetry: "active",
   });
   assert.match(result.stdout.join("\n"), /Terminal state: DEGRADED/);
-  assert.match(result.stdout.join("\n"), /Engine: DISABLED/);
+  assert.match(result.stdout.join("\n"), /Engine: INACTIVE/);
 });
 
 test("executable status keeps independently supplied terminal environments isolated", () => {
@@ -170,7 +183,7 @@ test("executable status keeps independently supplied terminal environments isola
   assert.match(enabled.stdout, /Terminal state: ACTIVE/);
   assert.match(enabled.stdout, /Terminal ID: terminal-a/);
   assert.equal(disabled.status, 0, disabled.stderr);
-  assert.match(disabled.stdout, /Terminal state: DISABLED/);
+  assert.match(disabled.stdout, /Terminal state: INACTIVE/);
   assert.match(disabled.stdout, /Terminal ID: terminal-b/);
   assert.match(disabled.stdout, /Telemetry: ACTIVE/);
 });

@@ -11,6 +11,10 @@
       "types": "./dist/core/adapters/index.d.ts",
       "import": "./dist/core/adapters/index.js"
     },
+    "./integration": {
+      "types": "./dist/core/integration/index.d.ts",
+      "import": "./dist/core/integration/index.js"
+    },
     "./memory": {
       "types": "./dist/core/memory/index.d.ts",
       "import": "./dist/core/memory/index.js"

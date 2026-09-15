@@ -76,7 +76,7 @@ export const runStatus: CommandHandler = (context) => {
   context.stdout(formatCapability("Agent", agent));
   context.stdout(
     policy.compression === "pass-through"
-      ? formatCapability("Engine", engine, "disabled", "compression pass-through for this terminal")
+      ? formatCapability("Engine", engine, "inactive", "compression pass-through for this terminal")
       : formatCapability("Engine", engine),
   );
   context.stdout("Telemetry: ACTIVE - baseline measurement remains enabled");
