@@ -6,6 +6,7 @@ import { INITIAL_SCHEMA_MIGRATION } from "./001-initial-schema.js";
 import { COLD_STORAGE_CLEANUP_AUDIT_MIGRATION } from "./002-cold-storage-cleanup-audit.js";
 import { STRUCTURED_MEMORY_CORE_MIGRATION } from "./003-structured-memory-core.js";
 import { STRUCTURED_MEMORY_SAFEGUARDS_MIGRATION } from "./004-structured-memory-safeguards.js";
+import { HOST_LIFECYCLE_MEMORY_MIGRATION } from "./005-host-lifecycle-memory.js";
 import type { Migration } from "./types.js";
 
 interface AppliedMigration {
@@ -28,6 +29,7 @@ export const MIGRATIONS: readonly Migration[] = [
   COLD_STORAGE_CLEANUP_AUDIT_MIGRATION,
   STRUCTURED_MEMORY_CORE_MIGRATION,
   STRUCTURED_MEMORY_SAFEGUARDS_MIGRATION,
+  HOST_LIFECYCLE_MEMORY_MIGRATION,
 ];
 
 const calculateChecksum = (migration: Migration): string =>
