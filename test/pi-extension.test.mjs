@@ -60,12 +60,46 @@ const withEnabled = async (value, run) => {
   }
 };
 
+const withTestOwners = async (value, run) => {
+  const previous = process.env.SZAL_PI_TEST_OWNERS;
+  if (value === undefined) {
+    delete process.env.SZAL_PI_TEST_OWNERS;
+  } else {
+    process.env.SZAL_PI_TEST_OWNERS = value;
+  }
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.SZAL_PI_TEST_OWNERS;
+    } else {
+      process.env.SZAL_PI_TEST_OWNERS = previous;
+    }
+  }
+};
+
 const eventFor = (text) => ({
   content: [{ type: "text", text }],
   input: { command: "printf lots" },
   isError: false,
   toolCallId: "tool-1",
   toolName: "bash",
+});
+
+const messageFor = (text) => ({
+  content: [{ type: "text", text }],
+  role: "toolResult",
+  timestamp: 123,
+  toolCallId: "tool-1",
+  toolName: "bash",
+});
+
+const branchEntryFor = (message) => ({
+  id: "entry-1",
+  message,
+  parentId: null,
+  timestamp: 123,
+  type: "message",
 });
 
 test("Pi extension compresses large enabled text tool results and records measurement", async () => {
@@ -161,6 +195,182 @@ test("Pi extension status command summarizes branch measurements", async () => {
     assert.match(notifications[0], /compression enabled/);
     assert.match(notifications[0], /saved 50 bytes \/ 12 estimated tokens/);
     assert.match(notifications[0], /bash: compressed 100→50 bytes/);
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi context hook shapes model context without changing canonical session history", async () => {
+  const loaded = await loadExtension();
+  try {
+    const { entries, handlers, pi } = createPi();
+    loaded.module.default(pi);
+    const handler = handlers.get("context");
+    const content = `${"context line\n".repeat(900)}final line`;
+    const canonicalMessage = messageFor(content);
+    const canonicalBranch = [branchEntryFor(canonicalMessage)];
+    const beforeCanonical = JSON.stringify(canonicalBranch);
+
+    const result = await withEnabled("1", () =>
+      handler(
+        { messages: [structuredClone(canonicalMessage)] },
+        { sessionManager: { getBranch: () => canonicalBranch } },
+      ),
+    );
+
+    assert.equal(JSON.stringify(canonicalBranch), beforeCanonical);
+    assert.equal(result.messages.length, 1);
+    assert.match(result.messages[0].content[0].text, /szal compressed/);
+    assert.ok(
+      Buffer.byteLength(result.messages[0].content[0].text, "utf8") <
+        Buffer.byteLength(content, "utf8"),
+    );
+    assert.equal(canonicalMessage.content[0].text, content);
+    const measurement = entries.find(
+      (entry) => entry.customType === loaded.module.SZAL_CONTEXT_ENTRY_TYPE,
+    );
+    assert.equal(measurement.data.reasonCode, "compressed");
+    assert.ok(measurement.data.rawContextBytes > measurement.data.shapedContextBytes);
+    assert.equal(measurement.data.canonicalHistoryIntact, true);
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi context measurements show reduced context reaches provider payload", async () => {
+  const loaded = await loadExtension();
+  try {
+    const { entries, handlers, pi } = createPi();
+    loaded.module.default(pi);
+    const contextHandler = handlers.get("context");
+    const providerHandler = handlers.get("before_provider_request");
+    const content = `${"provider line\n".repeat(900)}final line`;
+    const message = messageFor(content);
+
+    const shaped = await withEnabled("1", () =>
+      contextHandler(
+        { messages: [structuredClone(message)] },
+        { sessionManager: { getBranch: () => [] } },
+      ),
+    );
+    await withEnabled("1", () =>
+      providerHandler(
+        { payload: { messages: shaped.messages } },
+        { sessionManager: { getBranch: () => [] } },
+      ),
+    );
+
+    const providerMeasurement = entries.find(
+      (entry) => entry.customType === loaded.module.SZAL_PROVIDER_CONTEXT_ENTRY_TYPE,
+    );
+    assert.equal(providerMeasurement.data.reasonCode, "provider-payload-observed");
+    assert.ok(
+      providerMeasurement.data.rawContextBytes > providerMeasurement.data.shapedContextBytes,
+    );
+    assert.ok(
+      providerMeasurement.data.providerPayloadBytes < providerMeasurement.data.rawContextBytes,
+    );
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi context owner conflicts fail open and preserve canonical history", async () => {
+  const loaded = await loadExtension();
+  try {
+    const { entries, handlers, pi } = createPi();
+    loaded.module.default(pi);
+    const handler = handlers.get("context");
+    const content = `${"conflict line\n".repeat(900)}final line`;
+    const canonicalMessage = messageFor(content);
+    const canonicalBranch = [branchEntryFor(canonicalMessage)];
+    const beforeCanonical = JSON.stringify(canonicalBranch);
+
+    const result = await withTestOwners("szal-pi,other", () =>
+      withEnabled("1", () =>
+        handler(
+          { messages: [structuredClone(canonicalMessage)] },
+          { sessionManager: { getBranch: () => canonicalBranch } },
+        ),
+      ),
+    );
+
+    assert.equal(JSON.stringify(canonicalBranch), beforeCanonical);
+    assert.deepEqual(result.messages, [canonicalMessage]);
+    const measurement = entries.find(
+      (entry) => entry.customType === loaded.module.SZAL_CONTEXT_ENTRY_TYPE,
+    );
+    assert.equal(measurement.data.reasonCode, "owner-conflict");
+    assert.equal(measurement.data.failedOpen, true);
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi session_before_compact observes canonical compaction preparation", async () => {
+  const loaded = await loadExtension();
+  try {
+    const { entries, handlers, pi } = createPi();
+    loaded.module.default(pi);
+    const handler = handlers.get("session_before_compact");
+    const message = messageFor("compact me");
+    const branchEntries = [branchEntryFor(message)];
+    const beforeBranch = JSON.stringify(branchEntries);
+
+    const result = await withEnabled("1", () =>
+      handler(
+        {
+          branchEntries,
+          preparation: {
+            firstKeptEntryId: "entry-1",
+            messagesToSummarize: [message],
+            tokensBefore: 1234,
+            turnPrefixMessages: [],
+          },
+          reason: "manual",
+          signal: new AbortController().signal,
+          willRetry: false,
+        },
+        {},
+      ),
+    );
+
+    assert.equal(result, undefined);
+    assert.equal(JSON.stringify(branchEntries), beforeBranch);
+    const observation = entries.find(
+      (entry) => entry.customType === loaded.module.SZAL_COMPACTION_OBSERVATION_ENTRY_TYPE,
+    );
+    assert.equal(observation.data.tokensBefore, 1234);
+    assert.equal(observation.data.firstKeptEntryId, "entry-1");
+    assert.equal(observation.data.reason, "manual");
+    assert.equal(observation.data.owner, "szal-pi");
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi context shaping passes through disabled terminals", async () => {
+  const loaded = await loadExtension();
+  try {
+    const { entries, handlers, pi } = createPi();
+    loaded.module.default(pi);
+    const handler = handlers.get("context");
+    const content = `${"disabled line\n".repeat(900)}final line`;
+    const message = messageFor(content);
+
+    const result = await withEnabled(undefined, () =>
+      handler(
+        { messages: [structuredClone(message)] },
+        { sessionManager: { getBranch: () => [] } },
+      ),
+    );
+
+    assert.deepEqual(result.messages, [message]);
+    const measurement = entries.find(
+      (entry) => entry.customType === loaded.module.SZAL_CONTEXT_ENTRY_TYPE,
+    );
+    assert.equal(measurement.data.reasonCode, "terminal-pass-through");
+    assert.equal(measurement.data.rawContextBytes, measurement.data.shapedContextBytes);
   } finally {
     rmSync(loaded.directory, { force: true, recursive: true });
   }

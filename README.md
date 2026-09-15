@@ -177,7 +177,7 @@ files are not changed.
 
 Reload or restart Pi after a changed install or uninstall.
 
-When `SZAL_ENABLED=1` is active in the Pi process, the installed extension performs a thin fail-open compression slice for large text-only Pi tool results. It selects one Szal owner for each eligible category, leaves ambiguous or failed output byte-for-byte unchanged, and records minimal before/after measurements as `szal-compression-measurement` session entries. The `/szal` Pi command reports recent measurements and saved estimated tokens. Unset or `0` `SZAL_ENABLED` keeps Pi in pass-through mode while still recording baseline measurements when possible.
+When `SZAL_ENABLED=1` is active in the Pi process, the installed extension performs a thin fail-open compression slice for large text-only Pi tool results and per-request Pi context. It selects one Szal owner for each eligible category, leaves ambiguous or failed output byte-for-byte unchanged, shapes copied Pi context without mutating canonical session history, observes `session_before_compact` preparations without taking over Pi compaction, and records minimal before/after measurements as custom session entries. The `/szal` Pi command reports recent measurements and saved estimated tokens. Unset or `0` `SZAL_ENABLED` keeps Pi in pass-through mode while still recording baseline measurements when possible.
 
 ## Claude Code installation
 
