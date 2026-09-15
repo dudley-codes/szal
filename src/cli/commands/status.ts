@@ -1,4 +1,5 @@
 import {
+  resolveRuntimeIndicator,
   resolveRuntimePolicy,
   resolveTerminalState,
   type CapabilityState,
@@ -55,6 +56,7 @@ export const runStatus: CommandHandler = (context) => {
   }
 
   const terminal = resolveTerminalState(context.environment, stateOverride);
+  const indicator = resolveRuntimeIndicator(terminal);
   const policy = resolveRuntimePolicy(terminal);
   const defaultAgent: CliComponentStatus = {
     detail: "no active agent adapter detected",
@@ -71,6 +73,7 @@ export const runStatus: CommandHandler = (context) => {
 
   context.stdout(`Szal ${context.version}`);
   context.stdout(`Terminal state: ${terminal.capability.toUpperCase()} - ${terminal.detail}`);
+  context.stdout(`Runtime indicator: ${indicator}`);
   context.stdout(`Terminal ID: ${terminal.terminalId ?? "not assigned"}`);
   context.stdout(`Project: ${context.projectDirectory}`);
   context.stdout(formatCapability("Agent", agent));

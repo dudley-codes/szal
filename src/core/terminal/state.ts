@@ -4,6 +4,7 @@ export const SZAL_ENABLED_VARIABLE = "SZAL_ENABLED";
 export const SZAL_TERMINAL_ID_VARIABLE = "SZAL_TERMINAL_ID";
 
 export type CapabilityState = HostIntegrationState;
+export type RuntimeIndicator = "ON" | "degraded" | "OFF";
 export type TerminalMode = "on" | "off";
 export type TerminalStateSource = "default" | "environment" | "override";
 
@@ -78,6 +79,13 @@ export const resolveTerminalState = (
     source: "default",
     terminalId,
   };
+};
+
+export const resolveRuntimeIndicator = (state: TerminalState): RuntimeIndicator => {
+  if (state.capability === "active") {
+    return "ON";
+  }
+  return state.capability === "degraded" ? "degraded" : "OFF";
 };
 
 // Turning compression off never disables the instrumentation needed for baseline comparisons.

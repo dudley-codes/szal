@@ -7,6 +7,7 @@ import { parseArguments } from "../dist/cli/parse-arguments.js";
 import { runCli } from "../dist/cli/run-cli.js";
 import {
   renderTerminalStateExport,
+  resolveRuntimeIndicator,
   resolveRuntimePolicy,
   resolveTerminalState,
 } from "../dist/core/terminal/index.js";
@@ -78,11 +79,13 @@ test("two terminal environments retain independent state and identifiers", () =>
     {
       enabled: terminalA.enabled,
       id: terminalA.terminalId,
+      indicator: resolveRuntimeIndicator(terminalA),
       policy: resolveRuntimePolicy(terminalA),
     },
     {
       enabled: true,
       id: "terminal-a",
+      indicator: "ON",
       policy: { compression: "active", telemetry: "active" },
     },
   );
@@ -90,11 +93,13 @@ test("two terminal environments retain independent state and identifiers", () =>
     {
       enabled: terminalB.enabled,
       id: terminalB.terminalId,
+      indicator: resolveRuntimeIndicator(terminalB),
       policy: resolveRuntimePolicy(terminalB),
     },
     {
       enabled: false,
       id: "terminal-b",
+      indicator: "OFF",
       policy: { compression: "pass-through", telemetry: "active" },
     },
   );
@@ -109,8 +114,10 @@ test("explicit state overrides support non-interactive usage without changing th
 
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout.join("\n"), /Terminal state: ACTIVE - explicit ON override/);
+  assert.match(result.stdout.join("\n"), /Runtime indicator: ON/);
   assert.match(result.stdout.join("\n"), /Terminal ID: ci-terminal/);
   assert.match(splitResult.stdout.join("\n"), /Terminal state: INACTIVE - explicit OFF override/);
+  assert.match(splitResult.stdout.join("\n"), /Runtime indicator: OFF/);
   assert.equal(environment.SZAL_ENABLED, "0");
 });
 
@@ -124,6 +131,7 @@ test("status reports project and active agent and engine capabilities", async ()
 
   assert.equal(result.exitCode, 0);
   assert.match(output, /Terminal state: ACTIVE/);
+  assert.match(output, /Runtime indicator: ON/);
   assert.match(output, /Project: \/workspace\/project/);
   assert.match(output, /Agent: ACTIVE - Claude Code/);
   assert.match(output, /Engine: ACTIVE - llmtrim/);
@@ -152,6 +160,7 @@ test("OFF status is pass-through while telemetry and shared capabilities remain 
   const output = result.stdout.join("\n");
 
   assert.match(output, /Terminal state: INACTIVE/);
+  assert.match(output, /Runtime indicator: OFF/);
   assert.match(output, /Agent: ACTIVE - Claude Code/);
   assert.match(output, /Engine: INACTIVE - llmtrim \(compression pass-through for this terminal\)/);
   assert.match(output, /Telemetry: ACTIVE - baseline measurement remains enabled/);
@@ -165,7 +174,9 @@ test("invalid terminal state degrades safely instead of enabling compression", a
     compression: "pass-through",
     telemetry: "active",
   });
+  assert.equal(resolveRuntimeIndicator(state), "degraded");
   assert.match(result.stdout.join("\n"), /Terminal state: DEGRADED/);
+  assert.match(result.stdout.join("\n"), /Runtime indicator: degraded/);
   assert.match(result.stdout.join("\n"), /Engine: INACTIVE/);
 });
 
@@ -181,9 +192,11 @@ test("executable status keeps independently supplied terminal environments isola
 
   assert.equal(enabled.status, 0, enabled.stderr);
   assert.match(enabled.stdout, /Terminal state: ACTIVE/);
+  assert.match(enabled.stdout, /Runtime indicator: ON/);
   assert.match(enabled.stdout, /Terminal ID: terminal-a/);
   assert.equal(disabled.status, 0, disabled.stderr);
   assert.match(disabled.stdout, /Terminal state: INACTIVE/);
+  assert.match(disabled.stdout, /Runtime indicator: OFF/);
   assert.match(disabled.stdout, /Terminal ID: terminal-b/);
   assert.match(disabled.stdout, /Telemetry: ACTIVE/);
 });
