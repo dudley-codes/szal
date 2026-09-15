@@ -9,6 +9,7 @@ export const SZAL_MEASUREMENT_ENTRY_TYPE = "szal-compression-measurement";
 export const SZAL_CONTEXT_ENTRY_TYPE = "szal-context-measurement";
 export const SZAL_PROVIDER_CONTEXT_ENTRY_TYPE = "szal-provider-context-measurement";
 export const SZAL_COMPACTION_OBSERVATION_ENTRY_TYPE = "szal-compaction-observation";
+export const SZAL_RUNTIME_STATUS_ENTRY_TYPE = "szal-runtime-status";
 export const SZAL_OWNER = "szal-pi";
 
 const ELIGIBLE_CATEGORIES = new Set(["bash", "code", "json", "markdown", "memory", "tests"]);
@@ -61,6 +62,47 @@ const appendCustomMeasurement = (
 
 const appendMeasurement = (pi: ExtensionAPI, measurement: Record<string, unknown>): void => {
   appendCustomMeasurement(pi, SZAL_MEASUREMENT_ENTRY_TYPE, measurement);
+};
+
+type RuntimeStatusLabel = "ON" | "degraded" | "OFF";
+
+const runtimeStatus = (): { reasonCode: string; status: RuntimeStatusLabel } => {
+  const value = process.env.SZAL_ENABLED;
+  if (value === "1") {
+    return { reasonCode: "terminal-on", status: "ON" };
+  }
+  if (value === "0") {
+    return { reasonCode: "terminal-off", status: "OFF" };
+  }
+  if (value !== undefined && value.length > 0) {
+    return { reasonCode: "invalid-szal-enabled", status: "degraded" };
+  }
+  return { reasonCode: "terminal-unset", status: "OFF" };
+};
+
+const updateRuntimeStatus = (
+  pi: ExtensionAPI,
+  ctx: { ui?: { setStatus?: (key: string, text: string) => void } },
+  source: string,
+): RuntimeStatusLabel => {
+  const status = runtimeStatus();
+  try {
+    ctx.ui?.setStatus?.("szal", status.status);
+  } catch {
+    // Fail open: status rendering must never affect Pi behavior.
+  }
+  appendCustomMeasurement(pi, SZAL_RUNTIME_STATUS_ENTRY_TYPE, {
+    owner: SZAL_OWNER,
+    reasonCode: status.reasonCode,
+    source,
+    status: status.status,
+    timestamp: new Date().toISOString(),
+    ...(process.env.SZAL_ENABLED === undefined ? {} : { enabledValue: process.env.SZAL_ENABLED }),
+    ...(process.env.SZAL_TERMINAL_ID === undefined
+      ? {}
+      : { terminalId: process.env.SZAL_TERMINAL_ID }),
+  });
+  return status.status;
 };
 
 const makeMeasurement = (
@@ -670,6 +712,7 @@ const measurementSummary = (entries: readonly unknown[]): string => {
         `- compaction: ${String(item.reason ?? "unknown")} ${String(item.tokensBefore ?? 0)} tokens before`,
     );
   return [
+    `Runtime indicator: ${runtimeStatus().status}`,
     `Szal Pi extension is active (${process.env.SZAL_ENABLED === "1" ? "compression enabled" : "pass-through"}).`,
     `Measurements: ${measurements.length}; saved ${totalSavedBytes} bytes / ${totalSavedTokens} estimated tokens.`,
     `Context measurements: ${contextMeasurements.length}; saved ${contextSavedBytes} bytes before provider requests.`,
@@ -685,6 +728,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("szal", {
     description: "Show Szal Pi extension status",
     handler: async (_args, ctx) => {
+      updateRuntimeStatus(pi, ctx, "command");
       ctx.ui.notify(measurementSummary(ctx.sessionManager.getBranch()), "info");
     },
   });
@@ -730,6 +774,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (event, ctx) => {
+    updateRuntimeStatus(pi, ctx, `session-${String(event.reason ?? "unknown")}`);
     await capturePiLifecycleMemory(
       ctx,
       "session-lifecycle",

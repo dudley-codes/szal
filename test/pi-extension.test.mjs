@@ -25,6 +25,7 @@ const createPi = ({ appendThrows = false } = {}) => {
   const commands = new Map();
   const handlers = new Map();
   const entries = [];
+  const statuses = new Map();
   const tools = new Map();
   const pi = {
     appendEntry(customType, data) {
@@ -43,7 +44,7 @@ const createPi = ({ appendThrows = false } = {}) => {
       tools.set(tool.name, tool);
     },
   };
-  return { commands, entries, handlers, pi, tools };
+  return { commands, entries, handlers, pi, statuses, tools };
 };
 
 const withEnabled = async (value, run) => {
@@ -161,6 +162,12 @@ const eventFor = (text) => ({
   toolName: "bash",
 });
 
+const statusContext = (statuses) => ({
+  ui: {
+    setStatus: (key, text) => statuses.set(key, text),
+  },
+});
+
 const messageFor = (text) => ({
   content: [{ type: "text", text }],
   role: "toolResult",
@@ -175,6 +182,36 @@ const branchEntryFor = (message) => ({
   parentId: null,
   timestamp: 123,
   type: "message",
+});
+
+test("Pi extension updates runtime status indicator and records local status telemetry", async () => {
+  const loaded = await loadExtension();
+  try {
+    for (const [enabledValue, expectedStatus, expectedReason] of [
+      ["1", "ON", "terminal-on"],
+      ["0", "OFF", "terminal-off"],
+      [undefined, "OFF", "terminal-unset"],
+      ["maybe", "degraded", "invalid-szal-enabled"],
+    ]) {
+      const { entries, handlers, pi, statuses } = createPi();
+      loaded.module.default(pi);
+      const handler = handlers.get("session_start");
+
+      await withEnabled(enabledValue, () =>
+        handler({ reason: "startup" }, statusContext(statuses)),
+      );
+
+      const statusEntry = entries.find(
+        (entry) => entry.customType === loaded.module.SZAL_RUNTIME_STATUS_ENTRY_TYPE,
+      );
+      assert.equal(statuses.get("szal"), expectedStatus);
+      assert.equal(statusEntry.data.status, expectedStatus);
+      assert.equal(statusEntry.data.reasonCode, expectedReason);
+      assert.equal(statusEntry.data.source, "session-startup");
+    }
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+  }
 });
 
 test("Pi extension compresses large enabled text tool results, stores original, and records measurement", async () => {
