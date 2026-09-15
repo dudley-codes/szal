@@ -243,10 +243,18 @@ or unavailable with a stable issue code.
 
 Claude transport configuration returns an environment for the new agent process. Existing proxies
 are retained as `LLMTRIM_UPSTREAM_PROXY`, local-network bypasses are merged with the user's
-`NO_PROXY`, and OFF mode restores the upstream proxy instead of routing through llmtrim. The
-adapter never describes compression as enabled unless the daemon, port, and Claude launch
-environment are healthy together.
+`NO_PROXY`, and OFF mode restores the latest externally owned proxy values instead of routing
+through llmtrim. A proxy changed outside Szal while ON becomes the next upstream. Distinct HTTP and
+HTTPS upstreams are rejected rather than silently collapsed because llmtrim accepts one upstream.
+The adapter never describes compression as enabled unless every configured proxy alias routes
+through the verified daemon and the Claude API is not covered by a `NO_PROXY` host, parent-domain,
+or wildcard exclusion.
+
+Unsafe exclusions report `llmtrim-no-proxy-conflict`; distinct upstreams report
+`llmtrim-upstream-proxy-conflict`. Both include remediation and require the caller to remain in
+pass-through.
 
 `readTelemetry` returns cumulative llmtrim token counters. Snapshot deltas become approximate,
 ledger-ready compression measurements, while OFF mode records equal before/after bytes and tokens.
-Recall metadata extraction retains only llmtrim's opaque handles, not the raw tool output.
+Recall metadata extraction retains only llmtrim's opaque handles from complete marker lines, not the
+raw tool output or marker-like text embedded in ordinary output.

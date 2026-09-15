@@ -145,6 +145,32 @@ test("NO_PROXY conflicts prevent active Claude compression", async () => {
   assert.equal(calls.filter(({ arguments: arguments_ }) => arguments_[0] === "start").length, 0);
 });
 
+test("provider-wide NO_PROXY exclusions prevent active Claude compression", async () => {
+  const adapter = createLlmtrimAdapter({
+    runCommand: async () => commandResult(JSON.stringify(HEALTHY_STATUS)),
+  });
+  const routedEnvironment = {
+    HTTPS_PROXY: "http://127.0.0.1:43117",
+    HTTP_PROXY: "http://127.0.0.1:43117",
+    NODE_EXTRA_CA_CERTS: "/home/tester/.llmtrim/ca.pem",
+    http_proxy: "http://127.0.0.1:43117",
+    https_proxy: "http://127.0.0.1:43117",
+  };
+
+  for (const exclusion of [
+    "anthropic.com",
+    "ANTHROPIC.COM:443",
+    "api.anthropic.com.",
+    "*anthropic.com",
+    "localhost api.anthropic.com",
+  ]) {
+    const health = await adapter.health(context({ ...routedEnvironment, NO_PROXY: exclusion }));
+
+    assert.equal(health.status, "degraded", exclusion);
+    assert.equal(health.issues[0].code, "llmtrim-no-proxy-conflict", exclusion);
+  }
+});
+
 test("recovery remains unavailable before llmtrim 0.12.0", async () => {
   let pid = 42;
   const oldStatus = () => ({
@@ -230,6 +256,39 @@ test("installation is idempotent and verifies the installed binary", async () =>
   assert.equal(installCall.timeoutMs, 120_000);
 });
 
+test("distinct HTTP and HTTPS upstream proxies are rejected explicitly", async () => {
+  const calls = [];
+  const adapter = createLlmtrimAdapter({
+    runCommand: async (invocation) => {
+      calls.push(invocation);
+      if (invocation.arguments[0] === "--version") {
+        return commandResult("llmtrim 0.13.4\n");
+      }
+      return commandResult(JSON.stringify(HEALTHY_STATUS));
+    },
+  });
+  const proxyContext = context({
+    HTTPS_PROXY: "http://secure-proxy.test:8443",
+    HTTP_PROXY: "http://plain-proxy.test:8080",
+  });
+
+  const health = await adapter.health(proxyContext);
+  const configured = await adapter.configure(proxyContext, {
+    enableRecovery: true,
+    host: "claude",
+    mode: "on",
+    preset: "auto",
+  });
+
+  assert.equal(health.status, "degraded");
+  assert.equal(health.issues[0].code, "llmtrim-upstream-proxy-conflict");
+  assert.match(health.issues[0].remediation, /same upstream proxy/i);
+  assert.equal(configured.status, "failed");
+  assert.equal(configured.changed, false);
+  assert.equal(configured.issue.code, "llmtrim-upstream-proxy-conflict");
+  assert.equal(calls.filter(({ arguments: arguments_ }) => arguments_[0] === "start").length, 0);
+});
+
 test("Claude transport startup composes an existing proxy and is idempotent", async () => {
   let running = false;
   let pid = 42;
@@ -274,7 +333,7 @@ test("Claude transport startup composes an existing proxy and is idempotent", as
     },
   });
   const initialContext = context({
-    HTTPS_PROXY: "http://ignored-proxy.test:8080",
+    HTTPS_PROXY: "http://127.0.0.1:7890",
     LLMTRIM_HOME: "/var/lib/llmtrim",
     NO_PROXY: "upper.internal",
     https_proxy: "http://127.0.0.1:7890",
@@ -417,6 +476,107 @@ test("running daemon settings are restarted only when configuration changes", as
   });
 });
 
+test("ON adopts a proxy changed externally after configuration", async () => {
+  let pid = 42;
+  const calls = [];
+  const adapter = createLlmtrimAdapter({
+    runCommand: async (invocation) => {
+      calls.push(invocation);
+      if (invocation.arguments[0] === "--version") {
+        return commandResult("llmtrim 0.13.4\n");
+      }
+      if (invocation.arguments[0] === "start") {
+        pid += 1;
+        return commandResult("Interceptor running\n");
+      }
+      return commandResult(
+        JSON.stringify({
+          ...HEALTHY_STATUS,
+          daemon: { ...HEALTHY_STATUS.daemon, pid },
+        }),
+      );
+    },
+  });
+  const first = await adapter.configure(
+    context({
+      HTTPS_PROXY: "http://original-proxy.test:8080",
+      HTTP_PROXY: "http://original-proxy.test:8080",
+    }),
+    { enableRecovery: true, host: "claude", mode: "on", preset: "auto" },
+  );
+  assert.equal(first.status, "succeeded");
+
+  const externallyChangedContext = context({
+    ...first.details.environment,
+    HTTPS_PROXY: "http://latest-proxy.test:8443",
+  });
+  const alteredHealth = await adapter.health(externallyChangedContext);
+  const second = await adapter.configure(externallyChangedContext, {
+    enableRecovery: true,
+    host: "claude",
+    mode: "on",
+    preset: "auto",
+  });
+
+  assert.equal(alteredHealth.status, "degraded");
+  assert.equal(alteredHealth.issues[0].code, "llmtrim-transport-unconfigured");
+  assert.equal(second.status, "succeeded");
+  const startCalls = calls.filter(({ arguments: arguments_ }) => arguments_[0] === "start");
+  assert.equal(startCalls.length, 2);
+  assert.equal(startCalls[1].environment.LLMTRIM_UPSTREAM_PROXY, "http://latest-proxy.test:8443");
+});
+
+test("OFF restores proxy values changed externally after ON", async () => {
+  let pid = 42;
+  const adapter = createLlmtrimAdapter({
+    runCommand: async (invocation) => {
+      if (invocation.arguments[0] === "--version") {
+        return commandResult("llmtrim 0.13.4\n");
+      }
+      if (invocation.arguments[0] === "start") {
+        pid += 1;
+        return commandResult("Interceptor running\n");
+      }
+      return commandResult(
+        JSON.stringify({
+          ...HEALTHY_STATUS,
+          daemon: { ...HEALTHY_STATUS.daemon, pid },
+        }),
+      );
+    },
+  });
+  const on = await adapter.configure(
+    context({
+      HTTPS_PROXY: "http://original-proxy.test:8080",
+      HTTP_PROXY: "http://original-proxy.test:8080",
+    }),
+    { enableRecovery: true, host: "claude", mode: "on", preset: "auto" },
+  );
+  assert.equal(on.status, "succeeded");
+
+  const externalProxyValues = {
+    HTTPS_PROXY: "http://latest-secure-proxy.test:8443",
+    HTTP_PROXY: "http://latest-plain-proxy.test:8080",
+    http_proxy: "http://latest-lower-plain-proxy.test:8080",
+    https_proxy: "http://latest-lower-secure-proxy.test:8443",
+  };
+  const off = await adapter.configure(
+    context({
+      ...on.details.environment,
+      ...externalProxyValues,
+      no_proxy: "latest.internal",
+    }),
+    { enableRecovery: false, host: "claude", mode: "off", preset: "auto" },
+  );
+
+  assert.equal(off.status, "succeeded");
+  assert.equal(off.details.compression, "pass-through");
+  assert.deepEqual(off.details.environment, {
+    ...externalProxyValues,
+    no_proxy: "latest.internal",
+  });
+});
+
 test("OFF mode restores the upstream proxy and records byte-identical pass-through", async () => {
   let pid = 42;
   const adapter = createLlmtrimAdapter({
@@ -437,16 +597,16 @@ test("OFF mode restores the upstream proxy and records byte-identical pass-throu
     },
   });
   const originalEnvironment = {
-    HTTPS_PROXY: "http://secure-proxy.test:8443",
-    HTTP_PROXY: "http://plain-proxy.test:8080",
+    HTTPS_PROXY: "http://shared-proxy.test:8080",
+    HTTP_PROXY: "http://shared-proxy.test:8080",
     LLMTRIM_FIRST_ARRIVAL_RECALL: "false",
     LLMTRIM_PRESET: "aggressive",
     LLMTRIM_UPSTREAM_PROXY: "http://preconfigured-upstream.test:8080",
     NODE_EXTRA_CA_CERTS: "/custom/ca.pem",
     NODE_USE_ENV_PROXY: "0",
     NO_PROXY: "upper.internal",
-    http_proxy: "http://lower-plain-proxy.test:8080",
-    https_proxy: "http://lower-secure-proxy.test:8443",
+    http_proxy: "http://shared-proxy.test:8080",
+    https_proxy: "http://shared-proxy.test:8080",
     no_proxy: "lower.internal",
   };
   const on = await adapter.configure(context(originalEnvironment), {
@@ -726,12 +886,13 @@ test("telemetry snapshots, deltas, and recall references are ledger-ready", asyn
     requestCount: 1,
     source: "llmtrim-status",
   });
+  const marker = `[llmtrim: full output: llmtrim recall ${handle}; if unavailable, re-run the tool]`;
   assert.deepEqual(
-    extractLlmtrimRecallReferences(
-      `shortened output [llmtrim: full output: llmtrim recall ${handle}; if unavailable, re-run the tool] ${handle}`,
-    ),
+    extractLlmtrimRecallReferences(`shortened output\n${marker}\r\ncontinued output`),
     [{ handle }],
   );
+  assert.deepEqual(extractLlmtrimRecallReferences(`prefix ${marker}`), []);
+  assert.deepEqual(extractLlmtrimRecallReferences(`${marker} suffix`), []);
   assert.deepEqual(
     extractLlmtrimRecallReferences(`documentation says llmtrim recall ${handle}`),
     [],

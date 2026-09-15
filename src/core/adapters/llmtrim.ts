@@ -69,6 +69,13 @@ const CLAUDE_NO_PROXY_ISSUE: AdapterIssue = {
   retryable: false,
 };
 
+const UPSTREAM_PROXY_CONFLICT_ISSUE: AdapterIssue = {
+  code: "llmtrim-upstream-proxy-conflict",
+  message: "The HTTP and HTTPS proxy variables select different upstream proxies.",
+  remediation: "Configure the same upstream proxy for HTTP and HTTPS, or use pass-through mode.",
+  retryable: false,
+};
+
 const recoveryUnsupportedIssue = (version: string): AdapterIssue => ({
   code: "llmtrim-recovery-unsupported",
   message: `llmtrim ${version} does not support recoverable first-arrival shaping.`,
@@ -509,7 +516,7 @@ const noProxyBypassesClaude = (
 ): boolean =>
   [environment.no_proxy, environment.NO_PROXY]
     .filter((value): value is string => value !== undefined)
-    .flatMap((value) => value.split(","))
+    .flatMap((value) => value.split(/[,\s]+/u))
     .some((entry) => {
       const normalized = entry.trim().toLowerCase();
       if (normalized === "*") {
@@ -520,34 +527,31 @@ const noProxyBypassesClaude = (
       if (hasPort && normalized.slice(portSeparator + 1) !== "443") {
         return false;
       }
-      const pattern = hasPort ? normalized.slice(0, portSeparator) : normalized;
-      if (pattern.startsWith("*.")) {
+      const rawPattern = hasPort ? normalized.slice(0, portSeparator) : normalized;
+      const pattern = rawPattern.endsWith(".") ? rawPattern.slice(0, -1) : rawPattern;
+      if (pattern.startsWith("*")) {
         return CLAUDE_API_HOST.endsWith(pattern.slice(1));
       }
       if (pattern.startsWith(".")) {
         return CLAUDE_API_HOST.endsWith(pattern);
       }
-      return pattern === CLAUDE_API_HOST;
+      return CLAUDE_API_HOST === pattern || CLAUDE_API_HOST.endsWith(`.${pattern}`);
     });
 
 const caPath = (context: AdapterContext): string =>
   join(context.environment.LLMTRIM_HOME ?? join(context.homeDirectory, ".llmtrim"), "ca.pem");
 
-const effectiveProxy = (
-  environment: Readonly<Record<string, string | undefined>>,
-): string | undefined =>
-  environment.https_proxy ??
-  environment.HTTPS_PROXY ??
-  environment.http_proxy ??
-  environment.HTTP_PROXY;
-
 const contextRoutesToPort = (context: AdapterContext, port: number): boolean => {
   const proxyUrl = `http://127.0.0.1:${String(port)}`;
-  const httpsProxy = context.environment.https_proxy ?? context.environment.HTTPS_PROXY;
-  const httpProxy = context.environment.http_proxy ?? context.environment.HTTP_PROXY;
+  const routesProtocol = (keys: readonly ManagedEnvironmentKey[]): boolean => {
+    const values = keys
+      .map((key) => context.environment[key])
+      .filter((value): value is string => value !== undefined);
+    return values.length > 0 && values.every((value) => value === proxyUrl);
+  };
   return (
-    httpsProxy === proxyUrl &&
-    httpProxy === proxyUrl &&
+    routesProtocol(["HTTPS_PROXY", "https_proxy"]) &&
+    routesProtocol(["HTTP_PROXY", "http_proxy"]) &&
     context.environment.NODE_EXTRA_CA_CERTS === caPath(context)
   );
 };
@@ -561,12 +565,19 @@ const looksLikeOfficialLlmtrimProxy = (value: string | undefined): boolean =>
 const hasSuspectedLlmtrimProxy = (context: AdapterContext): boolean =>
   PROXY_ENVIRONMENT_KEYS.some((key) => looksLikeOfficialLlmtrimProxy(context.environment[key]));
 
-const upstreamProxy = (context: AdapterContext, knownProxyUrl?: string): string | undefined => {
-  const proxy = effectiveProxy(context.environment);
-  return proxy !== undefined && !isLlmtrimProxy(proxy, knownProxyUrl)
-    ? proxy
-    : context.environment.LLMTRIM_UPSTREAM_PROXY;
-};
+const externalProxyValues = (context: AdapterContext, knownProxyUrl?: string): Set<string> =>
+  new Set(
+    PROXY_ENVIRONMENT_KEYS.map((key) => context.environment[key]).filter(
+      (value): value is string => value !== undefined && !isLlmtrimProxy(value, knownProxyUrl),
+    ),
+  );
+
+const hasDistinctExternalProxies = (context: AdapterContext, knownProxyUrl?: string): boolean =>
+  externalProxyValues(context, knownProxyUrl).size > 1;
+
+const upstreamProxy = (context: AdapterContext, knownProxyUrl?: string): string | undefined =>
+  externalProxyValues(context, knownProxyUrl).values().next().value ??
+  context.environment.LLMTRIM_UPSTREAM_PROXY;
 
 const managedEnvironment = (
   environment: Readonly<Record<string, string | undefined>>,
@@ -690,12 +701,13 @@ const passThroughEnvironment = (
   const environment = definedEnvironment(context.environment);
   const state = parseEnvironmentState(environment[SZAL_LLMTRIM_ENVIRONMENT_STATE]);
   if (state !== undefined) {
+    const latestExternalValues = captureEnvironmentState(context, knownProxyUrl);
     for (const key of MANAGED_ENVIRONMENT_KEYS) {
-      const original = state.values[key];
-      if (original === undefined) {
+      const external = latestExternalValues[key];
+      if (external === undefined) {
         Reflect.deleteProperty(environment, key);
       } else {
-        environment[key] = original;
+        environment[key] = external;
       }
     }
     delete environment.SZAL_LLMTRIM_DAEMON_CONFIGURATION;
@@ -791,7 +803,7 @@ export const extractLlmtrimRecallReferences = (
 ): readonly LlmtrimRecallReference[] => {
   const handles = new Set<string>();
   for (const match of content.matchAll(
-    /\[llmtrim: full output: llmtrim recall (r_[A-Za-z0-9_-]{43}); if unavailable, re-run the tool\]/gu,
+    /^\[llmtrim: full output: llmtrim recall (r_[A-Za-z0-9_-]{43}); if unavailable, re-run the tool\]\r?$/gmu,
   )) {
     const handle = match[1];
     if (handle !== undefined) {
@@ -896,6 +908,11 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
     }
     if (noProxyBypassesClaude(context.environment)) {
       return { details, issues: [CLAUDE_NO_PROXY_ISSUE], status: "degraded" };
+    }
+    const knownProxyUrl =
+      details.port === undefined ? undefined : `http://127.0.0.1:${String(details.port)}`;
+    if (hasDistinctExternalProxies(context, knownProxyUrl)) {
+      return { details, issues: [UPSTREAM_PROXY_CONFLICT_ISSUE], status: "degraded" };
     }
     if (probe.value.daemon.health !== "healthy") {
       const caPresent = await fileExists(caPath(context));
@@ -1148,6 +1165,14 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
     const knownProxyPort = currentHealth.details.port ?? currentHealth.details.environmentPort;
     const knownProxyUrl =
       knownProxyPort === undefined ? undefined : `http://127.0.0.1:${String(knownProxyPort)}`;
+    if (hasDistinctExternalProxies(context, knownProxyUrl)) {
+      return {
+        changed: false,
+        issue: UPSTREAM_PROXY_CONFLICT_ISSUE,
+        rolledBack: true,
+        status: "failed",
+      };
+    }
     const upstream = upstreamProxy(context, knownProxyUrl);
     const configured = parseDaemonConfiguration(
       context.environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION],
