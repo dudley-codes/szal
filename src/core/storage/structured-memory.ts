@@ -73,11 +73,15 @@ export interface MemoryDecisionDetails {
 }
 
 interface MemoryItemInputBase {
+  confidence?: number;
   content: string;
   createdAt?: string;
   id: string;
   representation: WritableMemoryRepresentation;
   source: MemorySource;
+  sourceEventId?: string;
+  sourceEventKind?: string;
+  sourceHost?: string;
   status: WritableMemoryStatus;
   supersedesId?: string;
 }
@@ -100,11 +104,15 @@ export interface MemoryPolicy {
 export type MemoryPolicyLoadOptions = ConfigStoreOptions;
 
 interface MemoryItemRecordBase {
+  confidence: number | null;
   content: string;
   createdAt: string;
   id: string;
   projectId: string;
   sessionId: string | null;
+  sourceEventId: string | null;
+  sourceEventKind: string | null;
+  sourceHost: string | null;
   sourceUri: string | null;
   supersedesId: string | null;
   updatedAt: string;
@@ -160,14 +168,56 @@ export interface StoredMemoryItem {
   item: MemoryItemRecord;
 }
 
+export interface HostLifecycleMemoryCandidate {
+  class: MemoryClass;
+  confidence?: number;
+  content: string;
+  decision?: MemoryDecisionDetails;
+  key: string;
+  representation?: WritableMemoryRepresentation;
+  status: WritableMemoryStatus;
+  supersedesId?: string;
+}
+
+export interface HostLifecycleMemoryEvent {
+  candidates: readonly HostLifecycleMemoryCandidate[];
+  eventId: string;
+  host: string;
+  kind: string;
+  occurredAt?: string;
+  sessionId: string;
+}
+
+export interface MemoryCaptureRejectionRecord {
+  candidateJson: string;
+  candidateKey: string | null;
+  createdAt: string;
+  host: string;
+  id: string;
+  projectId: string;
+  reason: string;
+  sessionId: string | null;
+  sourceEventId: string;
+  sourceEventKind: string;
+}
+
+export interface CapturedHostLifecycleMemory {
+  accepted: StoredMemoryItem[];
+  rejected: MemoryCaptureRejectionRecord[];
+}
+
 interface MemoryItemRow {
   class: string;
+  confidence: number | null;
   content: string;
   created_at: string;
   id: string;
   project_id: string;
   representation: MemoryRepresentation;
   session_id: string | null;
+  source_event_id: string | null;
+  source_event_kind: string | null;
+  source_host: string | null;
   source_uri: string | null;
   status: string;
   supersedes_id: string | null;
@@ -190,7 +240,8 @@ interface MemoryDecisionRow {
 
 const MEMORY_ITEM_COLUMNS = `
   id, project_id, session_id, class, status, content, source_uri,
-  supersedes_id, created_at, updated_at, representation
+  supersedes_id, created_at, updated_at, representation, source_host,
+  source_event_id, source_event_kind, confidence
 `;
 
 const MEMORY_DECISION_COLUMNS = `
@@ -239,11 +290,15 @@ const assertCanonicalTimestamp = (value: string, label: string): void => {
 // Keep unconstrained legacy class and status strings visible behind the unknown discriminator.
 const mapMemoryItem = (row: MemoryItemRow): MemoryItemRecord => {
   const common = {
+    confidence: row.confidence,
     content: row.content,
     createdAt: row.created_at,
     id: row.id,
     projectId: row.project_id,
     sessionId: row.session_id,
+    sourceEventId: row.source_event_id,
+    sourceEventKind: row.source_event_kind,
+    sourceHost: row.source_host,
     sourceUri: row.source_uri,
     supersedesId: row.supersedes_id,
     updatedAt: row.updated_at,
@@ -399,6 +454,21 @@ const validateMemoryInput = (input: MemoryItemInput): void => {
   if (input.createdAt !== undefined) {
     assertCanonicalTimestamp(input.createdAt, "Memory createdAt");
   }
+  if (input.sourceHost !== undefined) {
+    assertNonEmpty(input.sourceHost, "Memory sourceHost");
+  }
+  if (input.sourceEventId !== undefined) {
+    assertNonEmpty(input.sourceEventId, "Memory sourceEventId");
+  }
+  if (input.sourceEventKind !== undefined) {
+    assertNonEmpty(input.sourceEventKind, "Memory sourceEventKind");
+  }
+  if (
+    input.confidence !== undefined &&
+    (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1)
+  ) {
+    throw new Error("Memory confidence must be between 0 and 1.");
+  }
   if (input.class === "decision") {
     if (input.decision.reason !== undefined && typeof input.decision.reason !== "string") {
       throw new TypeError("Memory decision reason must be a string.");
@@ -476,6 +546,10 @@ const assertIdempotentRetry = (
     existing.content === input.content &&
     existing.sourceUri === (input.source.artifactUri ?? null) &&
     existing.supersedesId === (input.supersedesId ?? null) &&
+    existing.sourceHost === (input.sourceHost ?? null) &&
+    existing.sourceEventId === (input.sourceEventId ?? null) &&
+    existing.sourceEventKind === (input.sourceEventKind ?? null) &&
+    existing.confidence === (input.confidence ?? null) &&
     existing.representation === expectedRepresentation &&
     (input.createdAt === undefined || existing.createdAt === input.createdAt);
   const decision = readDecisionForItem(database, input.id);
@@ -500,6 +574,92 @@ const assertIdempotentRetry = (
   return { decision, item: existing };
 };
 
+const storeMemoryItemInTransaction = (
+  database: BetterSqlite3.Database,
+  projectId: string,
+  input: MemoryItemInput,
+): StoredMemoryItem => {
+  const existing = readItemById(database, input.id);
+  if (existing !== undefined) {
+    return assertIdempotentRetry(database, projectId, input, existing);
+  }
+  if (
+    database.prepare("SELECT 1 FROM projects WHERE id = ?").pluck().get(projectId) === undefined
+  ) {
+    throw new Error(`Memory project ${projectId} does not exist.`);
+  }
+
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const decisionSupersedesId = resolveDecisionPredecessorId(database, projectId, input);
+  database
+    .prepare(
+      `INSERT INTO memory_items (
+         id, project_id, session_id, class, status, content, source_uri,
+         supersedes_id, created_at, updated_at, representation, source_host,
+         source_event_id, source_event_kind, confidence
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.id,
+      projectId,
+      input.source.sessionId ?? null,
+      input.class,
+      input.status,
+      input.content,
+      input.source.artifactUri ?? null,
+      input.supersedesId ?? null,
+      createdAt,
+      createdAt,
+      input.representation,
+      input.sourceHost ?? null,
+      input.sourceEventId ?? null,
+      input.sourceEventKind ?? null,
+      input.confidence ?? null,
+    );
+
+  if (input.class === "decision") {
+    database
+      .prepare(
+        `INSERT INTO decisions (
+           id, project_id, session_id, memory_item_id, decision, reason, rejected,
+           status, source_uri, supersedes_id, decided_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        projectId,
+        input.source.sessionId ?? null,
+        input.id,
+        input.content,
+        input.decision.reason ?? null,
+        input.decision.rejected ?? null,
+        input.status,
+        input.source.artifactUri ?? null,
+        decisionSupersedesId,
+        createdAt,
+      );
+  }
+
+  const item = readItemById(database, input.id);
+  if (item === undefined) {
+    throw new Error(`Memory item ${input.id} was not stored.`);
+  }
+  return { decision: readDecisionForItem(database, input.id), item };
+};
+
+const validateMemoryWrite = (
+  projectId: string,
+  input: MemoryItemInput,
+  policy: MemoryPolicy,
+): void => {
+  assertPolicy(policy);
+  if (!policy.enabled) {
+    throw new Error("Structured memory is disabled by configuration.");
+  }
+  assertNonEmpty(projectId, "Memory projectId");
+  validateMemoryInput(input);
+};
+
 // Persist one immutable item and its decision mirror, including predecessor transition, atomically.
 export const storeMemoryItem = (
   database: BetterSqlite3.Database,
@@ -507,76 +667,206 @@ export const storeMemoryItem = (
   input: MemoryItemInput,
   policy: MemoryPolicy,
 ): StoredMemoryItem => {
+  validateMemoryWrite(projectId, input, policy);
+  return database
+    .transaction(() => storeMemoryItemInTransaction(database, projectId, input))
+    .immediate();
+};
+
+const stableJson = (value: unknown): string => {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  return `{${Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+    .join(",")}}`;
+};
+
+const lifecycleCandidateId = (
+  projectId: string,
+  event: HostLifecycleMemoryEvent,
+  candidate: HostLifecycleMemoryCandidate,
+): string =>
+  `szal://memory/host-lifecycle/sha256/${createHash("sha256")
+    .update(
+      stableJson({
+        candidate: {
+          class: candidate.class,
+          content: candidate.content,
+          decision: candidate.decision,
+          key: candidate.key,
+          representation: candidate.representation ?? "exact",
+          status: candidate.status,
+          supersedesId: candidate.supersedesId,
+        },
+        eventId: event.eventId,
+        host: event.host,
+        kind: event.kind,
+        projectId,
+        sessionId: event.sessionId,
+      }),
+    )
+    .digest("hex")}`;
+
+const lifecycleRejectionId = (
+  projectId: string,
+  event: HostLifecycleMemoryEvent,
+  candidate: HostLifecycleMemoryCandidate,
+  reason: string,
+): string =>
+  `szal://memory-rejection/host-lifecycle/sha256/${createHash("sha256")
+    .update(
+      stableJson({
+        candidateKey: candidate.key,
+        eventId: event.eventId,
+        host: event.host,
+        kind: event.kind,
+        projectId,
+        reason,
+        sessionId: event.sessionId,
+      }),
+    )
+    .digest("hex")}`;
+
+const validateHostLifecycleEvent = (event: HostLifecycleMemoryEvent): void => {
+  assertNonEmpty(event.host, "Host lifecycle event host");
+  assertNonEmpty(event.sessionId, "Host lifecycle event sessionId");
+  assertNonEmpty(event.eventId, "Host lifecycle event eventId");
+  assertNonEmpty(event.kind, "Host lifecycle event kind");
+  if (event.occurredAt !== undefined) {
+    assertCanonicalTimestamp(event.occurredAt, "Host lifecycle event occurredAt");
+  }
+};
+
+const memoryInputFromLifecycleCandidate = (
+  event: HostLifecycleMemoryEvent,
+  id: string,
+  candidate: HostLifecycleMemoryCandidate,
+): MemoryItemInput => {
+  const common = {
+    ...(event.occurredAt === undefined ? {} : { createdAt: event.occurredAt }),
+    ...(candidate.supersedesId === undefined ? {} : { supersedesId: candidate.supersedesId }),
+    confidence: candidate.confidence ?? 1,
+    content: candidate.content,
+    id,
+    representation: candidate.representation ?? "exact",
+    source: { sessionId: event.sessionId },
+    sourceEventId: event.eventId,
+    sourceEventKind: event.kind,
+    sourceHost: event.host,
+    status: candidate.status,
+  };
+  if (candidate.class === "decision") {
+    return {
+      ...common,
+      class: "decision",
+      decision: candidate.decision ?? {},
+    };
+  }
+  if (candidate.decision !== undefined) {
+    throw new Error("Decision details are only valid for decision memory.");
+  }
+  return {
+    ...common,
+    class: candidate.class,
+  };
+};
+
+const insertCaptureRejection = (
+  database: BetterSqlite3.Database,
+  projectId: string,
+  event: HostLifecycleMemoryEvent,
+  candidate: HostLifecycleMemoryCandidate,
+  reason: string,
+): MemoryCaptureRejectionRecord => {
+  const createdAt = event.occurredAt ?? new Date().toISOString();
+  const candidateJson = stableJson(candidate);
+  const rejection = {
+    candidateJson,
+    candidateKey: candidate.key,
+    createdAt,
+    host: event.host,
+    id: lifecycleRejectionId(projectId, event, candidate, reason),
+    projectId,
+    reason,
+    sessionId: event.sessionId,
+    sourceEventId: event.eventId,
+    sourceEventKind: event.kind,
+  };
+  database
+    .prepare(
+      `INSERT INTO memory_capture_rejections (
+         id, project_id, session_id, host, source_event_id, source_event_kind,
+         candidate_key, candidate_json, reason, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    .run(
+      rejection.id,
+      rejection.projectId,
+      rejection.sessionId,
+      rejection.host,
+      rejection.sourceEventId,
+      rejection.sourceEventKind,
+      rejection.candidateKey,
+      rejection.candidateJson,
+      rejection.reason,
+      rejection.createdAt,
+    );
+  return rejection;
+};
+
+// Capture deterministic host lifecycle facts without inferring beyond adapter-normalized candidates.
+export const captureHostLifecycleMemory = (
+  database: BetterSqlite3.Database,
+  projectId: string,
+  event: HostLifecycleMemoryEvent,
+  policy: MemoryPolicy,
+): CapturedHostLifecycleMemory => {
   assertPolicy(policy);
   if (!policy.enabled) {
     throw new Error("Structured memory is disabled by configuration.");
   }
   assertNonEmpty(projectId, "Memory projectId");
-  validateMemoryInput(input);
+  validateHostLifecycleEvent(event);
 
   return database
     .transaction(() => {
-      const existing = readItemById(database, input.id);
-      if (existing !== undefined) {
-        return assertIdempotentRetry(database, projectId, input, existing);
-      }
-      if (
-        database.prepare("SELECT 1 FROM projects WHERE id = ?").pluck().get(projectId) === undefined
-      ) {
-        throw new Error(`Memory project ${projectId} does not exist.`);
-      }
+      const accepted: StoredMemoryItem[] = [];
+      const rejected: MemoryCaptureRejectionRecord[] = [];
+      const storeCandidate = database.transaction((input: MemoryItemInput) =>
+        storeMemoryItemInTransaction(database, projectId, input),
+      );
 
-      const createdAt = input.createdAt ?? new Date().toISOString();
-      const decisionSupersedesId = resolveDecisionPredecessorId(database, projectId, input);
-      database
-        .prepare(
-          `INSERT INTO memory_items (
-             id, project_id, session_id, class, status, content, source_uri,
-             supersedes_id, created_at, updated_at, representation
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.id,
-          projectId,
-          input.source.sessionId ?? null,
-          input.class,
-          input.status,
-          input.content,
-          input.source.artifactUri ?? null,
-          input.supersedesId ?? null,
-          createdAt,
-          createdAt,
-          input.representation,
-        );
-
-      if (input.class === "decision") {
-        database
-          .prepare(
-            `INSERT INTO decisions (
-               id, project_id, session_id, memory_item_id, decision, reason, rejected,
-               status, source_uri, supersedes_id, decided_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            input.id,
-            projectId,
-            input.source.sessionId ?? null,
-            input.id,
-            input.content,
-            input.decision.reason ?? null,
-            input.decision.rejected ?? null,
-            input.status,
-            input.source.artifactUri ?? null,
-            decisionSupersedesId,
-            createdAt,
+      for (const candidate of event.candidates) {
+        try {
+          assertNonEmpty(candidate.key, "Host lifecycle memory candidate key");
+          const input = memoryInputFromLifecycleCandidate(
+            event,
+            lifecycleCandidateId(projectId, event, candidate),
+            candidate,
           );
+          validateMemoryWrite(projectId, input, policy);
+          accepted.push(storeCandidate(input));
+        } catch (error) {
+          rejected.push(
+            insertCaptureRejection(
+              database,
+              projectId,
+              event,
+              candidate,
+              error instanceof Error ? error.message : String(error),
+            ),
+          );
+        }
       }
 
-      const item = readItemById(database, input.id);
-      if (item === undefined) {
-        throw new Error(`Memory item ${input.id} was not stored.`);
-      }
-      return { decision: readDecisionForItem(database, input.id), item };
+      return { accepted, rejected };
     })
     .immediate();
 };

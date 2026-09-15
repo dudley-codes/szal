@@ -8,6 +8,7 @@ import test from "node:test";
 import BetterSqlite3 from "better-sqlite3";
 
 import {
+  captureHostLifecycleMemory,
   exportMemoryArchive,
   findMemoryProject,
   loadMemoryPolicy,
@@ -246,6 +247,218 @@ test("exact writes preserve every class, writable status, and provenance form", 
         }),
       /cannot begin with status superseded/,
     );
+  } finally {
+    database.close();
+  }
+});
+
+test("host lifecycle capture is deterministic, exact, provenance-aware, and records rejections", () => {
+  const database = createMemoryDatabase();
+  recordSession(database, "session-1");
+  const exactContent = "Keep src/a b.ts::Widget<T> and do NOT remove --flag.";
+  const event = {
+    candidates: [
+      {
+        class: "requirement",
+        confidence: 0.9,
+        content: exactContent,
+        key: "requirement:widget-flag",
+        status: "selected",
+      },
+      {
+        class: "task",
+        content: "invalid status is rejected without losing valid candidates",
+        key: "task:invalid",
+        status: "superseded",
+      },
+    ],
+    eventId: "event-1",
+    host: "claude",
+    kind: "prompt-lifecycle",
+    occurredAt: fixedTime(7),
+    sessionId: "session-1",
+  };
+
+  try {
+    const first = captureHostLifecycleMemory(database, "project-1", event, ENABLED_MEMORY_POLICY);
+    const second = captureHostLifecycleMemory(database, "project-1", event, ENABLED_MEMORY_POLICY);
+
+    assert.equal(first.accepted.length, 1);
+    assert.equal(first.rejected.length, 1);
+    assert.equal(second.accepted[0].item.id, first.accepted[0].item.id);
+    assert.equal(second.rejected[0].id, first.rejected[0].id);
+    assert.equal(
+      database
+        .prepare("SELECT COUNT(*) FROM memory_items WHERE project_id = 'project-1'")
+        .pluck()
+        .get(),
+      1,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) FROM memory_capture_rejections").pluck().get(),
+      1,
+    );
+
+    const [item] = readMemoryArchive(database, "project-1").items;
+    assert.equal(item.content, exactContent);
+    assert.equal(item.sourceHost, "claude");
+    assert.equal(item.sessionId, "session-1");
+    assert.equal(item.sourceEventId, "event-1");
+    assert.equal(item.sourceEventKind, "prompt-lifecycle");
+    assert.equal(item.confidence, 0.9);
+
+    const repeatedFactDifferentEvent = {
+      ...event,
+      eventId: "event-2",
+      candidates: [event.candidates[0]],
+      occurredAt: fixedTime(8),
+    };
+    captureHostLifecycleMemory(
+      database,
+      "project-1",
+      repeatedFactDifferentEvent,
+      ENABLED_MEMORY_POLICY,
+    );
+    assert.deepEqual(
+      readMemoryArchive(database, "project-1").items.map(({ content, sourceEventId }) => ({
+        content,
+        sourceEventId,
+      })),
+      [
+        { content: exactContent, sourceEventId: "event-1" },
+        { content: exactContent, sourceEventId: "event-2" },
+      ],
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("host lifecycle capture covers each adapter lifecycle event class", () => {
+  const database = createMemoryDatabase();
+  recordSession(database, "session-1");
+  const fixtures = [
+    ["session-lifecycle", "environment", "node 24.0.0"],
+    ["prompt-lifecycle", "requirement", "Preserve --exact-symbol"],
+    ["tool-lifecycle", "file-state", "src/index.ts modified"],
+    ["subagent-lifecycle", "task", "Review delegated to subagent"],
+    ["compaction-lifecycle", "test-state", "npm run check passed"],
+  ];
+
+  try {
+    for (const [index, [kind, memoryClass, content]] of fixtures.entries()) {
+      captureHostLifecycleMemory(
+        database,
+        "project-1",
+        {
+          candidates: [
+            {
+              class: memoryClass,
+              content,
+              key: `${kind}:${memoryClass}`,
+              status: "selected",
+            },
+          ],
+          eventId: `lifecycle-${String(index)}`,
+          host: "adapter-contract",
+          kind,
+          occurredAt: fixedTime(index),
+          sessionId: "session-1",
+        },
+        ENABLED_MEMORY_POLICY,
+      );
+    }
+
+    assert.deepEqual(
+      readMemoryArchive(database, "project-1").items.map(
+        ({ class: memoryClass, sourceEventKind }) => ({
+          class: memoryClass,
+          sourceEventKind,
+        }),
+      ),
+      fixtures.map(([sourceEventKind, memoryClass]) => ({ class: memoryClass, sourceEventKind })),
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("host lifecycle capture respects working memory limits without deleting provenance", () => {
+  const database = createMemoryDatabase();
+  recordSession(database, "session-1");
+  const limited = { enabled: true, maxItems: 1 };
+
+  try {
+    for (const index of [1, 2]) {
+      captureHostLifecycleMemory(
+        database,
+        "project-1",
+        {
+          candidates: [
+            {
+              class: "environment",
+              content: `environment fact ${String(index)}`,
+              key: `environment:${String(index)}`,
+              status: "selected",
+            },
+          ],
+          eventId: `event-${String(index)}`,
+          host: "pi",
+          kind: "session-lifecycle",
+          occurredAt: fixedTime(index),
+          sessionId: "session-1",
+        },
+        ENABLED_MEMORY_POLICY,
+      );
+    }
+
+    assert.deepEqual(
+      readWorking(database, "project-1", limited).items.map(({ content }) => content),
+      ["environment fact 2"],
+    );
+    assert.equal(readMemoryArchive(database, "project-1").items.length, 2);
+  } finally {
+    database.close();
+  }
+});
+
+test("host lifecycle memory migration keeps existing structured rows readable", () => {
+  const database = new BetterSqlite3(":memory:");
+  database.pragma("foreign_keys = ON");
+
+  try {
+    applyMigrations(database, MIGRATIONS.slice(0, 4));
+    database.exec(`
+      INSERT INTO projects (id, root_path) VALUES ('project-1', '/workspace/project-1');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri, created_at, updated_at, representation
+      ) VALUES (
+        'pre-capture-memory', 'project-1', 'requirement', 'selected', 'existing exact',
+        'artifact://legacy', '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z', 'exact'
+      );
+    `);
+    applyMigrations(database);
+
+    assert.deepEqual(readMemoryArchive(database, "project-1").items, [
+      {
+        class: "requirement",
+        confidence: null,
+        content: "existing exact",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        id: "pre-capture-memory",
+        projectId: "project-1",
+        representation: "exact",
+        sessionId: null,
+        sourceEventId: null,
+        sourceEventKind: null,
+        sourceHost: null,
+        sourceUri: "artifact://legacy",
+        status: "selected",
+        supersedesId: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
   } finally {
     database.close();
   }

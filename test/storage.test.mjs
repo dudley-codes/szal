@@ -29,6 +29,7 @@ const EXPECTED_TABLES = [
   "compression_events",
   "decisions",
   "installations",
+  "memory_capture_rejections",
   "memory_items",
   "projects",
   "recalls",

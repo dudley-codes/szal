@@ -49,6 +49,7 @@ export { applyMigrations, MIGRATIONS, type Migration } from "./migrations/index.
 export { ensureStorageDirectories, resolveStoragePaths, type StoragePaths } from "./paths.js";
 export {
   DEFAULT_MEMORY_POLICY,
+  captureHostLifecycleMemory,
   exportMemoryArchive,
   findMemoryProject,
   MEMORY_CLASSES,
@@ -63,6 +64,10 @@ export {
   resolveMemoryProject,
   resolveProjectIdentity,
   storeMemoryItem,
+  type CapturedHostLifecycleMemory,
+  type HostLifecycleMemoryCandidate,
+  type HostLifecycleMemoryEvent,
+  type MemoryCaptureRejectionRecord,
   type MemoryClass,
   type MemoryCollection,
   type MemoryDecisionDetails,
