@@ -76,9 +76,10 @@ environment state. Each item retains one of the `selected`, `considered`, `rejec
 
 Content, symbols, paths, negations, provenance, and decision details are stored exactly as supplied.
 A successor marks its predecessor superseded in the same transaction, while every prior item and
-decision remains available in the archive. Stored summaries can be restored verbatim for context,
-but only exact records are eligible as future summarization inputs. Migrated records whose
-representation is unknown are also excluded from summarization.
+decision remains available in the archive. A summary cannot supersede exact or unknown memory.
+Stored summaries can be restored verbatim for context, but only exact records are eligible as future
+summarization inputs. Migrated records whose representation is unknown are also excluded from
+summarization.
 
 `memory.enabled` gates capture and working-memory retrieval. `memory.maxItems` caps the newest
 current items returned per project without deleting archive or supersession history. Archive export
@@ -93,6 +94,42 @@ szal memory export --json
 
 Export writes deterministic Markdown or JSON to stdout only. The default includes full history;
 `--current` omits superseded records. Redirect stdout explicitly when a file is wanted.
+
+Adapters and other integrations use the supported `szal/memory` module to register each session,
+store items, and load another session's working set. Representation is explicit so a caller cannot
+accidentally feed an existing summary into another summarization pass:
+
+```js
+import {
+  openSzalDatabase,
+  readWorkingMemory,
+  recordTelemetrySession,
+  resolveMemoryProject,
+  storeMemoryItem,
+} from "szal/memory";
+
+const storage = openSzalDatabase();
+const project = resolveMemoryProject(storage.connection, process.cwd());
+recordTelemetrySession(storage.connection, {
+  host: "claude",
+  id: "session-id",
+  mode: "on",
+  projectId: project.id,
+});
+storeMemoryItem(storage.connection, project.id, {
+  class: "constraint",
+  content: "Do NOT rename Widget<T>.",
+  id: "memory-id",
+  representation: "exact",
+  source: { sessionId: "session-id" },
+  status: "selected",
+});
+const memory = readWorkingMemory(storage.connection, project.id);
+storage.connection.close();
+```
+
+Writes commit immediately to the external database. Reopening it and registering a later session
+returns the same project memory through `readWorkingMemory`.
 
 After linking, the currently implemented commands are:
 

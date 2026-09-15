@@ -8,23 +8,21 @@ import test from "node:test";
 import BetterSqlite3 from "better-sqlite3";
 
 import {
-  applyMigrations,
   exportMemoryArchive,
   findMemoryProject,
   MEMORY_CLASSES,
-  MIGRATIONS,
   MEMORY_STATUSES,
   openSzalDatabase,
   readMemoryArchive,
   readMemoryForSummarization,
   readWorkingMemory,
-  recordTelemetryProject,
   recordTelemetrySession,
   renderMemoryExport,
   resolveMemoryProject,
   resolveProjectIdentity,
   storeMemoryItem,
-} from "../dist/core/storage/index.js";
+} from "szal/memory";
+import { applyMigrations, MIGRATIONS, recordTelemetryProject } from "../dist/core/storage/index.js";
 
 const createTemporaryDirectory = (name) => mkdtempSync(join(tmpdir(), `${name}-`));
 
@@ -121,6 +119,7 @@ test("exact writes preserve every class, writable status, and provenance form", 
         content: exactContent,
         createdAt: fixedTime(index),
         id,
+        representation: "exact",
         source,
         status: writableStatuses[index % writableStatuses.length],
       };
@@ -155,6 +154,7 @@ test("exact writes preserve every class, writable status, and provenance form", 
       content: exactContent,
       createdAt: fixedTime(0),
       id: "item-0",
+      representation: "exact",
       source: { sessionId: "session-1" },
       status: "selected",
     };
@@ -162,6 +162,15 @@ test("exact writes preserve every class, writable status, and provenance form", 
     assert.throws(
       () => storeMemoryItem(database, "project-1", { ...retryInput, content: "changed" }),
       /already used by different content or metadata/,
+    );
+    assert.throws(
+      () =>
+        storeMemoryItem(database, "project-1", {
+          ...retryInput,
+          id: "missing-representation",
+          representation: undefined,
+        }),
+      /representation must be exact or summary/,
     );
     assert.throws(
       () =>
@@ -211,6 +220,7 @@ test("memory and decision history survives reopen and supersedes atomically", ()
       createdAt: fixedTime(1),
       decision: { reason: "Keeps symbols", rejected: "Use lossy v0" },
       id: "decision-1",
+      representation: "exact",
       source: { artifactUri: "artifact://plan/1", sessionId: "session-1" },
       status: "selected",
     });
@@ -225,6 +235,7 @@ test("memory and decision history survives reopen and supersedes atomically", ()
         createdAt: fixedTime(2),
         decision: { reason: "Handles negation", rejected: "Keep exact v1" },
         id: "decision-2",
+        representation: "exact",
         source: { sessionId: "session-2" },
         status: "selected",
         supersedesId: "decision-1",
@@ -268,6 +279,7 @@ test("memory and decision history survives reopen and supersedes atomically", ()
             createdAt: fixedTime(1),
             decision: { reason: "Keeps symbols", rejected: "Use lossy v0" },
             id: "decision-1",
+            representation: "exact",
             source: { artifactUri: "artifact://plan/1", sessionId: "session-1" },
             status: "selected",
           }),
@@ -317,6 +329,7 @@ test("migrated unknown rows are readable but never offered for summarization", (
       content: "new exact bytes",
       createdAt: fixedTime(1),
       id: "new-exact",
+      representation: "exact",
       source: { artifactUri: "artifact://new" },
       status: "selected",
     });
@@ -340,6 +353,77 @@ test("migrated unknown rows are readable but never offered for summarization", (
   }
 });
 
+test("legacy decision keys remain supersedable and leave one current decision", () => {
+  const database = new BetterSqlite3(":memory:");
+  database.pragma("foreign_keys = ON");
+
+  try {
+    applyMigrations(database, MIGRATIONS.slice(0, 2));
+    database.exec(`
+      INSERT INTO projects (id, root_path)
+      VALUES ('project-1', '/workspace/project-1');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri, created_at, updated_at
+      ) VALUES (
+        'legacy-memory-id', 'project-1', 'decision', 'selected', 'legacy choice',
+        'artifact://legacy', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+      );
+      INSERT INTO decisions (
+        id, project_id, memory_item_id, decision, reason, rejected, status,
+        source_uri, decided_at
+      ) VALUES (
+        'legacy-decision-id', 'project-1', 'legacy-memory-id', 'legacy choice',
+        'legacy reason', 'legacy rejection', 'selected', 'artifact://legacy',
+        '2026-01-01T00:00:00.000Z'
+      );
+    `);
+    applyMigrations(database);
+
+    storeMemoryItem(database, "project-1", {
+      class: "decision",
+      content: "structured choice",
+      createdAt: fixedTime(1),
+      decision: { reason: "structured reason", rejected: "legacy choice" },
+      id: "structured-memory-id",
+      representation: "exact",
+      source: { artifactUri: "artifact://structured" },
+      status: "selected",
+      supersedesId: "legacy-memory-id",
+    });
+
+    const archive = readMemoryArchive(database, "project-1");
+    assert.deepEqual(
+      archive.items.map(({ id, status }) => ({ id, status })),
+      [
+        { id: "legacy-memory-id", status: "superseded" },
+        { id: "structured-memory-id", status: "selected" },
+      ],
+    );
+    assert.deepEqual(
+      archive.decisions.map(({ id, status, supersedesId }) => ({ id, status, supersedesId })),
+      [
+        { id: "legacy-decision-id", status: "superseded", supersedesId: null },
+        {
+          id: "structured-memory-id",
+          status: "selected",
+          supersedesId: "legacy-decision-id",
+        },
+      ],
+    );
+    const current = readMemoryArchive(database, "project-1", { currentOnly: true });
+    assert.deepEqual(
+      current.items.map(({ id }) => id),
+      ["structured-memory-id"],
+    );
+    assert.deepEqual(
+      current.decisions.map(({ id }) => id),
+      ["structured-memory-id"],
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test("working policy caps without deletion and summarization reads exact rows only", () => {
   const database = createMemoryDatabase();
   const enabled = { enabled: true, maxItems: 2 };
@@ -355,6 +439,7 @@ test("working policy caps without deletion and summarization reads exact rows on
       content: "other project",
       createdAt: fixedTime(4),
       id: "other-project-item",
+      representation: "exact",
       source: { artifactUri: "artifact://other-project" },
       status: "selected",
     });
@@ -363,9 +448,28 @@ test("working policy caps without deletion and summarization reads exact rows on
       content: "old exact",
       createdAt: fixedTime(1),
       id: "old-exact",
+      representation: "exact",
       source: { artifactUri: "artifact://old" },
       status: "selected",
     });
+    assert.throws(
+      () =>
+        storeMemoryItem(database, "project-1", {
+          class: "requirement",
+          content: "lossy replacement",
+          createdAt: fixedTime(2),
+          id: "lossy-successor",
+          representation: "summary",
+          source: { artifactUri: "artifact://lossy" },
+          status: "selected",
+          supersedesId: "old-exact",
+        }),
+      /summary memory cannot supersede exact or unknown memory/,
+    );
+    assert.equal(
+      database.prepare("SELECT status FROM memory_items WHERE id = 'old-exact'").pluck().get(),
+      "selected",
+    );
     storeMemoryItem(database, "project-1", {
       class: "constraint",
       content: "stored summary verbatim ```",
@@ -380,6 +484,7 @@ test("working policy caps without deletion and summarization reads exact rows on
       content: "new exact",
       createdAt: fixedTime(3),
       id: "new-exact",
+      representation: "exact",
       source: { artifactUri: "artifact://new" },
       status: "selected",
     });
@@ -408,6 +513,7 @@ test("working policy caps without deletion and summarization reads exact rows on
             class: "task",
             content: "disabled",
             id: "disabled-write",
+            representation: "exact",
             source: { artifactUri: "artifact://disabled" },
             status: "selected",
           },
@@ -438,4 +544,38 @@ test("working policy caps without deletion and summarization reads exact rows on
   } finally {
     database.close();
   }
+});
+
+test("memory export ordering is a locale-independent total order", () => {
+  const project = { id: "project-1", kind: "cwd", rootPath: "/workspace/project-1" };
+  const common = {
+    class: "symbol",
+    content: "exact",
+    createdAt: fixedTime(1),
+    projectId: project.id,
+    representation: "exact",
+    sessionId: null,
+    sourceUri: "artifact://unicode",
+    status: "selected",
+    supersedesId: null,
+    updatedAt: fixedTime(1),
+  };
+  const composed = { ...common, id: "é" };
+  const decomposed = { ...common, id: "é" };
+  const first = renderMemoryExport(
+    project,
+    { decisions: [], items: [composed, decomposed], projectId: project.id },
+    "json",
+  );
+  const second = renderMemoryExport(
+    project,
+    { decisions: [], items: [decomposed, composed], projectId: project.id },
+    "json",
+  );
+
+  assert.equal(first, second);
+  assert.deepEqual(
+    JSON.parse(first).items.map(({ id }) => id),
+    ["é", "é"],
+  );
 });

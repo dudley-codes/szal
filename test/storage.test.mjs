@@ -683,6 +683,24 @@ test("structured-memory database invariants protect new rows and decision mirror
       "superseded",
     );
     assert.throws(
+      () =>
+        database
+          .prepare(
+            `
+            INSERT OR REPLACE INTO memory_items (
+              id, project_id, session_id, class, status, content, source_uri,
+              supersedes_id, created_at, updated_at, representation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          )
+          .run(...values({ content: "replaced", id: "successor" })),
+      /memory id already exists/,
+    );
+    assert.equal(
+      database.prepare("SELECT content FROM memory_items WHERE id = 'successor'").pluck().get(),
+      "content",
+    );
+    assert.throws(
       () => insertMemory.run(...values({ id: "second-successor", supersedesId: "predecessor" })),
       /already superseded|already has a successor/,
     );
@@ -736,6 +754,36 @@ test("structured-memory database invariants protect new rows and decision mirror
       "artifact://source",
       null,
       "2026-01-01T00:00:00.000Z",
+    );
+    assert.throws(
+      () =>
+        database
+          .prepare(
+            `
+            INSERT OR REPLACE INTO decisions (
+              id, project_id, session_id, memory_item_id, decision, reason, rejected,
+              status, source_uri, supersedes_id, decided_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          )
+          .run(
+            "decision-1",
+            "project-1",
+            "session-1",
+            "decision-1",
+            "replacement",
+            "replacement reason",
+            "replacement rejection",
+            "selected",
+            "artifact://source",
+            null,
+            "2026-01-01T00:00:00.000Z",
+          ),
+      /decision id already exists/,
+    );
+    assert.equal(
+      database.prepare("SELECT decision FROM decisions WHERE id = 'decision-1'").pluck().get(),
+      "content",
     );
     assert.throws(
       () => database.prepare("UPDATE decisions SET reason = 'changed'").run(),

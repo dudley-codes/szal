@@ -32,6 +32,21 @@ export const MEMORY_STATUSES = [
 
 export const MEMORY_REPRESENTATIONS = ["exact", "summary", "unknown"] as const;
 
+const GIT_PROJECT_SCOPE_ENVIRONMENT = new Set<string>([
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_DIR",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_INDEX_FILE",
+  "GIT_NAMESPACE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_PREFIX",
+  "GIT_WORK_TREE",
+]);
+
 export type MemoryClass = (typeof MEMORY_CLASSES)[number];
 export type MemoryStatus = (typeof MEMORY_STATUSES)[number];
 export type MemoryRepresentation = (typeof MEMORY_REPRESENTATIONS)[number];
@@ -56,7 +71,7 @@ interface MemoryItemInputBase {
   content: string;
   createdAt?: string;
   id: string;
-  representation?: WritableMemoryRepresentation;
+  representation: WritableMemoryRepresentation;
   source: MemorySource;
   status: WritableMemoryStatus;
   supersedesId?: string;
@@ -250,6 +265,17 @@ const mapMemoryDecision = (row: MemoryDecisionRow): MemoryDecisionRecord => ({
   supersedesId: row.supersedes_id,
 });
 
+// Ignore ambient repository selectors so the requested directory alone determines project identity.
+const unscopedGitEnvironment = (): NodeJS.ProcessEnv =>
+  Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) =>
+        !GIT_PROJECT_SCOPE_ENVIRONMENT.has(name) &&
+        !name.startsWith("GIT_CONFIG_KEY_") &&
+        !name.startsWith("GIT_CONFIG_VALUE_"),
+    ),
+  );
+
 // Resolve a stable external project identity without invoking a command shell.
 export const resolveProjectIdentity = (
   workingDirectory: string = process.cwd(),
@@ -270,7 +296,11 @@ export const resolveProjectIdentity = (
     const output = execFileSync(
       "git",
       ["-C", absoluteWorkingDirectory, "rev-parse", "--path-format=absolute", "--show-toplevel"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      {
+        encoding: "utf8",
+        env: unscopedGitEnvironment(),
+        stdio: ["ignore", "pipe", "ignore"],
+      },
     );
     gitRoot = output.replace(/\r?\n$/, "");
     if (gitRoot.length === 0) {
@@ -334,7 +364,7 @@ const validateMemoryInput = (input: MemoryItemInput): void => {
   if (!(MEMORY_STATUSES as readonly string[]).includes(status) || status === "superseded") {
     throw new Error(`Memory cannot begin with status ${status}.`);
   }
-  const representation: string = input.representation ?? "exact";
+  const representation: unknown = input.representation;
   if (representation !== "exact" && representation !== "summary") {
     throw new Error("Memory representation must be exact or summary for new items.");
   }
@@ -388,6 +418,21 @@ const readDecisionForItem = (
   return row === undefined ? null : mapMemoryDecision(row);
 };
 
+// Follow the memory predecessor edge to the independently keyed legacy decision record.
+const resolveDecisionPredecessorId = (
+  database: BetterSqlite3.Database,
+  input: MemoryItemInput,
+): string | null => {
+  if (input.class !== "decision" || input.supersedesId === undefined) {
+    return null;
+  }
+  const predecessor = readDecisionForItem(database, input.supersedesId);
+  if (predecessor === null) {
+    throw new Error(`Decision memory ${input.supersedesId} has no linked decision.`);
+  }
+  return predecessor.id;
+};
+
 const readItemById = (
   database: BetterSqlite3.Database,
   id: string,
@@ -405,7 +450,7 @@ const assertIdempotentRetry = (
   input: MemoryItemInput,
   existing: MemoryItemRecord,
 ): StoredMemoryItem => {
-  const expectedRepresentation = input.representation ?? "exact";
+  const expectedRepresentation = input.representation;
   const matches =
     existing.projectId === projectId &&
     existing.sessionId === (input.source.sessionId ?? null) &&
@@ -417,6 +462,7 @@ const assertIdempotentRetry = (
     existing.representation === expectedRepresentation &&
     (input.createdAt === undefined || existing.createdAt === input.createdAt);
   const decision = readDecisionForItem(database, input.id);
+  const expectedDecisionSupersedesId = resolveDecisionPredecessorId(database, input);
   const decisionMatches =
     input.class === "decision"
       ? decision !== null &&
@@ -428,7 +474,7 @@ const assertIdempotentRetry = (
         decision.rejected === (input.decision.rejected ?? null) &&
         decision.status === input.status &&
         decision.sourceUri === (input.source.artifactUri ?? null) &&
-        decision.supersedesId === (input.supersedesId ?? null)
+        decision.supersedesId === expectedDecisionSupersedesId
       : decision === null;
 
   if (!matches || !decisionMatches) {
@@ -464,7 +510,7 @@ export const storeMemoryItem = (
       }
 
       const createdAt = input.createdAt ?? new Date().toISOString();
-      const representation = input.representation ?? "exact";
+      const decisionSupersedesId = resolveDecisionPredecessorId(database, input);
       database
         .prepare(
           `INSERT INTO memory_items (
@@ -483,7 +529,7 @@ export const storeMemoryItem = (
           input.supersedesId ?? null,
           createdAt,
           createdAt,
-          representation,
+          input.representation,
         );
 
       if (input.class === "decision") {
@@ -504,7 +550,7 @@ export const storeMemoryItem = (
             input.decision.rejected ?? null,
             input.status,
             input.source.artifactUri ?? null,
-            input.supersedesId ?? null,
+            decisionSupersedesId,
             createdAt,
           );
       }
@@ -523,7 +569,18 @@ const readProjectDecisions = (
   projectId: string,
   currentOnly = false,
 ): MemoryDecisionRecord[] => {
-  const currentFilter = currentOnly ? "AND status <> 'superseded'" : "";
+  const currentFilter = currentOnly
+    ? `AND status <> 'superseded'
+       AND (
+         memory_item_id IS NULL
+         OR EXISTS (
+           SELECT 1
+             FROM memory_items
+            WHERE memory_items.id = decisions.memory_item_id
+              AND memory_items.status <> 'superseded'
+         )
+       )`
+    : "";
   return (
     database
       .prepare(
@@ -610,18 +667,19 @@ export const readMemoryArchive = (
   };
 };
 
+const compareText = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
 // Canonicalize collection order and project fields before deterministic serialization.
 const createExportDocument = (
   project: MemoryProjectIdentity,
   collection: MemoryCollection,
 ): MemoryExportDocument => ({
   decisions: [...collection.decisions].sort(
-    (left, right) =>
-      left.decidedAt.localeCompare(right.decidedAt) || left.id.localeCompare(right.id),
+    (left, right) => compareText(left.decidedAt, right.decidedAt) || compareText(left.id, right.id),
   ),
   items: [...collection.items].sort(
-    (left, right) =>
-      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+    (left, right) => compareText(left.createdAt, right.createdAt) || compareText(left.id, right.id),
   ),
   project: {
     id: project.id,

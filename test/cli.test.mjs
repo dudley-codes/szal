@@ -233,6 +233,7 @@ test("config commands persist and retrieve global values with JSON output", () =
 test("memory export preserves history outside the repository across real CLI processes", () => {
   const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-home-"));
   const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-project-"));
+  const ambientDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-ambient-"));
   const emptyDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-empty-"));
   const nestedDirectory = join(projectDirectory, "src");
   const markerPath = join(nestedDirectory, "Widget.ts");
@@ -246,6 +247,7 @@ test("memory export preserves history outside the repository across real CLI pro
 
   try {
     execFileSync("git", ["init", "--quiet", projectDirectory]);
+    execFileSync("git", ["init", "--quiet", ambientDirectory]);
     mkdirSync(nestedDirectory, { recursive: true });
     writeFileSync(markerPath, "export const canonical = true;\n");
 
@@ -264,6 +266,7 @@ test("memory export preserves history outside the repository across real CLI pro
         createdAt: "2026-01-02T03:04:01.000Z",
         decision: { reason: "Preserve exact symbols", rejected: "Rename Widget" },
         id: "decision-1",
+        representation: "exact",
         source: { sessionId: "session-1" },
         status: "selected",
       });
@@ -273,6 +276,7 @@ test("memory export preserves history outside the repository across real CLI pro
         createdAt: "2026-01-02T03:04:02.000Z",
         decision: { reason: "The path is provenance", rejected: "Keep only the name" },
         id: "decision-2",
+        representation: "exact",
         source: { artifactUri: "artifact://plan/2", sessionId: "session-1" },
         status: "selected",
         supersedesId: "decision-1",
@@ -282,6 +286,7 @@ test("memory export preserves history outside the repository across real CLI pro
         content: exactError,
         createdAt: "2026-01-02T03:04:03.000Z",
         id: "error-1",
+        representation: "exact",
         source: { artifactUri: "artifact://test/error" },
         status: "unknown",
       });
@@ -291,6 +296,11 @@ test("memory export preserves history outside the repository across real CLI pro
 
     const before = snapshotDirectory(projectDirectory);
     const fullResult = runExecutable(["memory", "export", "--json"], nestedDirectory, environment);
+    const ambientResult = runExecutable(["memory", "export", "--json"], nestedDirectory, {
+      ...environment,
+      GIT_DIR: join(ambientDirectory, ".git"),
+      GIT_WORK_TREE: ambientDirectory,
+    });
     const repeatedResult = runExecutable(
       ["memory", "export", "--project", "..", "--json"],
       nestedDirectory,
@@ -310,6 +320,8 @@ test("memory export preserves history outside the repository across real CLI pro
     );
 
     assert.equal(fullResult.status, 0, fullResult.stderr);
+    assert.equal(ambientResult.status, 0, ambientResult.stderr);
+    assert.equal(ambientResult.stdout, fullResult.stdout);
     assert.equal(repeatedResult.status, 0, repeatedResult.stderr);
     assert.equal(repeatedResult.stdout, fullResult.stdout);
     const fullArchive = JSON.parse(fullResult.stdout);
@@ -379,6 +391,7 @@ test("memory export preserves history outside the repository across real CLI pro
   } finally {
     rmSync(homeDirectory, { force: true, recursive: true });
     rmSync(projectDirectory, { force: true, recursive: true });
+    rmSync(ambientDirectory, { force: true, recursive: true });
     rmSync(emptyDirectory, { force: true, recursive: true });
   }
 });

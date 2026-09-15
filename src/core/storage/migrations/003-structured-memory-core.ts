@@ -21,6 +21,10 @@ CREATE TRIGGER memory_items_structured_insert
 BEFORE INSERT ON memory_items
 BEGIN
   SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM memory_items WHERE memory_items.id = NEW.id)
+    THEN RAISE(ABORT, 'memory id already exists')
+  END;
+  SELECT CASE
     WHEN NEW.representation NOT IN ('exact', 'summary')
     THEN RAISE(ABORT, 'memory representation must be exact or summary for new rows')
   END;
@@ -86,6 +90,17 @@ BEGIN
            AND predecessor.class IS NOT NEW.class
       )
     THEN RAISE(ABORT, 'memory successor must preserve its predecessor class')
+  END;
+  SELECT CASE
+    WHEN NEW.supersedes_id IS NOT NULL
+      AND NEW.representation = 'summary'
+      AND EXISTS (
+        SELECT 1
+          FROM memory_items AS predecessor
+         WHERE predecessor.id = NEW.supersedes_id
+           AND predecessor.representation <> 'summary'
+      )
+    THEN RAISE(ABORT, 'summary memory cannot supersede exact or unknown memory')
   END;
   SELECT CASE
     WHEN NEW.supersedes_id IS NOT NULL
@@ -181,7 +196,7 @@ END;
 
 CREATE TRIGGER memory_items_mirror_decision_supersession
 AFTER UPDATE OF status ON memory_items
-WHEN NEW.representation IN ('exact', 'summary')
+WHEN OLD.status IS NOT NEW.status
   AND NEW.status = 'superseded'
 BEGIN
   UPDATE decisions
@@ -192,6 +207,10 @@ END;
 CREATE TRIGGER decisions_structured_insert
 BEFORE INSERT ON decisions
 BEGIN
+  SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM decisions WHERE decisions.id = NEW.id)
+    THEN RAISE(ABORT, 'decision id already exists')
+  END;
   SELECT CASE
     WHEN NEW.memory_item_id IS NULL
       OR NOT EXISTS (
@@ -220,20 +239,21 @@ BEGIN
          AND NEW.decision IS memory_items.content
          AND NEW.status IS memory_items.status
          AND NEW.source_uri IS memory_items.source_uri
-         AND NEW.supersedes_id IS memory_items.supersedes_id
          AND NEW.decided_at IS memory_items.created_at
+         AND (
+           (
+             memory_items.supersedes_id IS NULL
+             AND NEW.supersedes_id IS NULL
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM decisions AS predecessor
+              WHERE predecessor.id = NEW.supersedes_id
+                AND predecessor.memory_item_id = memory_items.supersedes_id
+           )
+         )
     )
     THEN RAISE(ABORT, 'linked decision must mirror its memory item')
-  END;
-  SELECT CASE
-    WHEN NEW.supersedes_id IS NOT NULL
-      AND NOT EXISTS (
-        SELECT 1
-          FROM decisions AS predecessor
-         WHERE predecessor.id = NEW.supersedes_id
-           AND predecessor.memory_item_id = NEW.supersedes_id
-      )
-    THEN RAISE(ABORT, 'linked decision predecessor does not exist')
   END;
 END;
 
