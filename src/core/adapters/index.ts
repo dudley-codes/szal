@@ -1,5 +1,23 @@
 export { AGENT_CAPABILITIES, type AgentAdapter, type AgentCapabilityName } from "./agent.js";
 export {
+  createClaudeAdapter,
+  type ClaudeAdapter,
+  type ClaudeAdapterOptions,
+  type ClaudeCommandInvocation,
+  type ClaudeCommandResult,
+  type ClaudeCommandRunner,
+  type ClaudeConfigureRequest,
+  type ClaudeDetectionDetails,
+  type ClaudeHookPolicy,
+  type ClaudeHookSurface,
+  type ClaudeInstallDetails,
+  type ClaudeInstallRequest,
+  type ClaudeSqueezFeature,
+  type SqueezHookSelection,
+  type SqueezHookStager,
+  type StagedSqueezHooks,
+} from "./claude.js";
+export {
   COMPRESSION_ENGINE_CAPABILITIES,
   type CompressionEngineAdapter,
   type CompressionEngineCapabilityName,
@@ -8,6 +26,7 @@ export {
   MINIMUM_SAFE_SQUEEZ_VERSION,
   SQUEEZ_COMPRESSION_CAPABILITIES,
   SQUEEZ_SUPPORTED_HOSTS,
+  SQUEEZ_TOOL_OUTPUT_CATEGORIES,
   createSqueezAdapter,
   inspectSqueez,
   squeezEngineState,
@@ -17,10 +36,12 @@ export {
   type SqueezDetectionDetails,
 } from "./squeez.js";
 export {
+  LLMTRIM_COMPRESSION_CAPABILITIES,
   createLlmtrimAdapter,
   createLlmtrimPassThroughMeasurement,
   diffLlmtrimTelemetry,
   extractLlmtrimRecallReferences,
+  llmtrimEngineState,
   type CreateLlmtrimAdapterOptions,
   type LlmtrimAdapter,
   type LlmtrimCapabilityName,

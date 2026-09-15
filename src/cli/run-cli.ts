@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { runConfig } from "./commands/config.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runHelp } from "./commands/help.js";
+import { runInstall } from "./commands/install.js";
 import { runMemory } from "./commands/memory.js";
 import { runShell } from "./commands/shell.js";
 import { runOff, runOn } from "./commands/terminal-state.js";
@@ -12,6 +13,7 @@ import type { CliComponentStatus, CommandHandler } from "./commands/types.js";
 import { runVersion } from "./commands/version.js";
 import { parseArguments, type CliCommandName } from "./parse-arguments.js";
 import type { CompressionEngineState } from "../core/compression/index.js";
+import type { ClaudeAdapter } from "../core/adapters/index.js";
 
 export interface CliIo {
   stderr: (message: string) => void;
@@ -20,6 +22,7 @@ export interface CliIo {
 
 export interface CliOptions {
   agent?: CliComponentStatus;
+  claudeAdapter?: Pick<ClaudeAdapter, "install">;
   compressionEngines?: readonly CompressionEngineState[];
   engine?: CliComponentStatus;
   environment?: Readonly<Record<string, string | undefined>>;
@@ -32,6 +35,7 @@ const COMMAND_HANDLERS: Readonly<Record<CliCommandName, CommandHandler>> = {
   config: runConfig,
   doctor: runDoctor,
   help: runHelp,
+  install: runInstall,
   memory: runMemory,
   off: runOff,
   on: runOn,
@@ -50,11 +54,11 @@ const DEFAULT_IO: CliIo = {
 };
 
 // Dispatch parsed commands through injected state and I/O so terminal isolation is testable.
-export const runCli = (
+export const runCli = async (
   arguments_: readonly string[],
   options: CliOptions,
   io: CliIo = DEFAULT_IO,
-): number => {
+): Promise<number> => {
   const parsedArguments = parseArguments(arguments_);
   const environment = options.environment ?? process.env;
   const environmentHome = environment.HOME;
@@ -73,6 +77,7 @@ export const runCli = (
   return COMMAND_HANDLERS[parsedArguments.command]({
     ...(options.agent === undefined ? {} : { agent: options.agent }),
     arguments_: parsedArguments.arguments_ ?? [],
+    ...(options.claudeAdapter === undefined ? {} : { claudeAdapter: options.claudeAdapter }),
     ...(options.compressionEngines === undefined
       ? {}
       : { compressionEngines: options.compressionEngines }),
