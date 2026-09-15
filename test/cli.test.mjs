@@ -24,6 +24,8 @@ import {
   storeMemoryItem,
 } from "../dist/core/storage/index.js";
 
+const ENABLED_MEMORY_POLICY = { enabled: true, maxItems: 10_000 };
+
 // Capture injected command I/O for focused dispatch tests without spawning a process.
 const captureCli = (arguments_) => {
   const stdout = [];
@@ -260,36 +262,51 @@ test("memory export preserves history outside the repository across real CLI pro
         mode: "on",
         projectId: project.id,
       });
-      storeMemoryItem(storage.connection, project.id, {
-        class: "decision",
-        content: "Keep Widget<T>",
-        createdAt: "2026-01-02T03:04:01.000Z",
-        decision: { reason: "Preserve exact symbols", rejected: "Rename Widget" },
-        id: "decision-1",
-        representation: "exact",
-        source: { sessionId: "session-1" },
-        status: "selected",
-      });
-      storeMemoryItem(storage.connection, project.id, {
-        class: "decision",
-        content: "Keep Widget<T> and its path",
-        createdAt: "2026-01-02T03:04:02.000Z",
-        decision: { reason: "The path is provenance", rejected: "Keep only the name" },
-        id: "decision-2",
-        representation: "exact",
-        source: { artifactUri: "artifact://plan/2", sessionId: "session-1" },
-        status: "selected",
-        supersedesId: "decision-1",
-      });
-      storeMemoryItem(storage.connection, project.id, {
-        class: "error",
-        content: exactError,
-        createdAt: "2026-01-02T03:04:03.000Z",
-        id: "error-1",
-        representation: "exact",
-        source: { artifactUri: "artifact://test/error" },
-        status: "unknown",
-      });
+      storeMemoryItem(
+        storage.connection,
+        project.id,
+        {
+          class: "decision",
+          content: "Keep Widget<T>",
+          createdAt: "2026-01-02T03:04:01.000Z",
+          decision: { reason: "Preserve exact symbols", rejected: "Rename Widget" },
+          id: "decision-1",
+          representation: "exact",
+          source: { sessionId: "session-1" },
+          status: "selected",
+        },
+        ENABLED_MEMORY_POLICY,
+      );
+      storeMemoryItem(
+        storage.connection,
+        project.id,
+        {
+          class: "decision",
+          content: "Keep Widget<T> and its path",
+          createdAt: "2026-01-02T03:04:02.000Z",
+          decision: { reason: "The path is provenance", rejected: "Keep only the name" },
+          id: "decision-2",
+          representation: "exact",
+          source: { artifactUri: "artifact://plan/2", sessionId: "session-1" },
+          status: "selected",
+          supersedesId: "decision-1",
+        },
+        ENABLED_MEMORY_POLICY,
+      );
+      storeMemoryItem(
+        storage.connection,
+        project.id,
+        {
+          class: "error",
+          content: exactError,
+          createdAt: "2026-01-02T03:04:03.000Z",
+          id: "error-1",
+          representation: "exact",
+          source: { artifactUri: "artifact://test/error" },
+          status: "unknown",
+        },
+        ENABLED_MEMORY_POLICY,
+      );
     } finally {
       storage.connection.close();
     }

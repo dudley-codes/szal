@@ -5,7 +5,12 @@ import { resolve } from "node:path";
 
 import type BetterSqlite3 from "better-sqlite3";
 
-import { DEFAULT_CONFIG, type SzalConfig } from "../config/index.js";
+import {
+  DEFAULT_CONFIG,
+  loadConfig,
+  type ConfigStoreOptions,
+  type SzalConfig,
+} from "../config/index.js";
 import { recordTelemetryProject, type ProjectTelemetryIdentity } from "./telemetry-ledger.js";
 
 export const MEMORY_CLASSES = [
@@ -91,6 +96,8 @@ export interface MemoryPolicy {
   enabled: boolean;
   maxItems: number;
 }
+
+export type MemoryPolicyLoadOptions = ConfigStoreOptions;
 
 interface MemoryItemRecordBase {
   content: string;
@@ -201,7 +208,13 @@ export const memoryPolicyFromConfig = (config: SzalConfig): MemoryPolicy => ({
   maxItems: config.memory.maxItems,
 });
 
-const assertPolicy = (policy: MemoryPolicy): void => {
+export const loadMemoryPolicy = (options: MemoryPolicyLoadOptions = {}): MemoryPolicy =>
+  memoryPolicyFromConfig(loadConfig(options).config);
+
+const assertPolicy = (policy: MemoryPolicy | undefined): void => {
+  if (policy === undefined) {
+    throw new Error("Structured memory policy is required.");
+  }
   if (typeof policy.enabled !== "boolean") {
     throw new Error("Structured memory enabled must be a boolean.");
   }
@@ -421,6 +434,7 @@ const readDecisionForItem = (
 // Follow the memory predecessor edge to the independently keyed legacy decision record.
 const resolveDecisionPredecessorId = (
   database: BetterSqlite3.Database,
+  projectId: string,
   input: MemoryItemInput,
 ): string | null => {
   if (input.class !== "decision" || input.supersedesId === undefined) {
@@ -428,7 +442,10 @@ const resolveDecisionPredecessorId = (
   }
   const predecessor = readDecisionForItem(database, input.supersedesId);
   if (predecessor === null) {
-    throw new Error(`Decision memory ${input.supersedesId} has no linked decision.`);
+    return null;
+  }
+  if (predecessor.projectId !== projectId) {
+    throw new Error("Decision predecessor must belong to the same project.");
   }
   return predecessor.id;
 };
@@ -462,7 +479,7 @@ const assertIdempotentRetry = (
     existing.representation === expectedRepresentation &&
     (input.createdAt === undefined || existing.createdAt === input.createdAt);
   const decision = readDecisionForItem(database, input.id);
-  const expectedDecisionSupersedesId = resolveDecisionPredecessorId(database, input);
+  const expectedDecisionSupersedesId = resolveDecisionPredecessorId(database, projectId, input);
   const decisionMatches =
     input.class === "decision"
       ? decision !== null &&
@@ -488,7 +505,7 @@ export const storeMemoryItem = (
   database: BetterSqlite3.Database,
   projectId: string,
   input: MemoryItemInput,
-  policy: MemoryPolicy = DEFAULT_MEMORY_POLICY,
+  policy: MemoryPolicy,
 ): StoredMemoryItem => {
   assertPolicy(policy);
   if (!policy.enabled) {
@@ -510,7 +527,7 @@ export const storeMemoryItem = (
       }
 
       const createdAt = input.createdAt ?? new Date().toISOString();
-      const decisionSupersedesId = resolveDecisionPredecessorId(database, input);
+      const decisionSupersedesId = resolveDecisionPredecessorId(database, projectId, input);
       database
         .prepare(
           `INSERT INTO memory_items (
@@ -578,6 +595,11 @@ const readProjectDecisions = (
              FROM memory_items
             WHERE memory_items.id = decisions.memory_item_id
               AND memory_items.status <> 'superseded'
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM memory_items AS successor
+                 WHERE successor.supersedes_id = memory_items.id
+              )
          )
        )`
     : "";
@@ -614,6 +636,11 @@ const readCurrentMemory = (
              FROM memory_items
             WHERE project_id = ?
               AND status <> 'superseded'
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM memory_items AS successor
+                 WHERE successor.supersedes_id = memory_items.id
+              )
               ${representationFilter}
             ORDER BY created_at DESC, id DESC
             LIMIT ?
@@ -623,7 +650,7 @@ const readCurrentMemory = (
     .all(projectId, policy.maxItems) as MemoryItemRow[];
   const items = rows.map(mapMemoryItem);
   const itemIds = new Set(items.map(({ id }) => id));
-  const decisions = readProjectDecisions(database, projectId).filter(
+  const decisions = readProjectDecisions(database, projectId, true).filter(
     ({ memoryItemId }) => memoryItemId !== null && itemIds.has(memoryItemId),
   );
   return { decisions, items, projectId };
@@ -632,14 +659,14 @@ const readCurrentMemory = (
 export const readWorkingMemory = (
   database: BetterSqlite3.Database,
   projectId: string,
-  policy: MemoryPolicy = DEFAULT_MEMORY_POLICY,
+  policy: MemoryPolicy,
 ): MemoryCollection => readCurrentMemory(database, projectId, policy, false);
 
 // Return only exact current rows so summaries and unclassified v2 rows cannot be summarized again.
 export const readMemoryForSummarization = (
   database: BetterSqlite3.Database,
   projectId: string,
-  policy: MemoryPolicy = DEFAULT_MEMORY_POLICY,
+  policy: MemoryPolicy,
 ): MemoryCollection => readCurrentMemory(database, projectId, policy, true);
 
 // Read every historical item and decision independently so even unconstrained v2 rows are retained.
@@ -648,7 +675,15 @@ export const readMemoryArchive = (
   projectId: string,
   options: ReadMemoryArchiveOptions = {},
 ): MemoryCollection => {
-  const currentFilter = options.currentOnly === true ? "AND status <> 'superseded'" : "";
+  const currentFilter =
+    options.currentOnly === true
+      ? `AND status <> 'superseded'
+         AND NOT EXISTS (
+           SELECT 1
+             FROM memory_items AS successor
+            WHERE successor.supersedes_id = memory_items.id
+         )`
+      : "";
   const items = (
     database
       .prepare(

@@ -101,6 +101,7 @@ accidentally feed an existing summary into another summarization pass:
 
 ```js
 import {
+  loadMemoryPolicy,
   openSzalDatabase,
   readWorkingMemory,
   recordTelemetrySession,
@@ -109,6 +110,7 @@ import {
 } from "szal/memory";
 
 const storage = openSzalDatabase();
+const policy = loadMemoryPolicy();
 const project = resolveMemoryProject(storage.connection, process.cwd());
 recordTelemetrySession(storage.connection, {
   host: "claude",
@@ -116,15 +118,20 @@ recordTelemetrySession(storage.connection, {
   mode: "on",
   projectId: project.id,
 });
-storeMemoryItem(storage.connection, project.id, {
-  class: "constraint",
-  content: "Do NOT rename Widget<T>.",
-  id: "memory-id",
-  representation: "exact",
-  source: { sessionId: "session-id" },
-  status: "selected",
-});
-const memory = readWorkingMemory(storage.connection, project.id);
+storeMemoryItem(
+  storage.connection,
+  project.id,
+  {
+    class: "constraint",
+    content: "Do NOT rename Widget<T>.",
+    id: "memory-id",
+    representation: "exact",
+    source: { sessionId: "session-id" },
+    status: "selected",
+  },
+  policy,
+);
+const memory = readWorkingMemory(storage.connection, project.id, policy);
 storage.connection.close();
 ```
 

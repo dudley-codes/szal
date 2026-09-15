@@ -10,6 +10,7 @@ import BetterSqlite3 from "better-sqlite3";
 import {
   exportMemoryArchive,
   findMemoryProject,
+  loadMemoryPolicy,
   MEMORY_CLASSES,
   MEMORY_STATUSES,
   openSzalDatabase,
@@ -22,6 +23,7 @@ import {
   resolveProjectIdentity,
   storeMemoryItem,
 } from "szal/memory";
+import { DEFAULT_CONFIG, writeConfig } from "../dist/core/config/index.js";
 import { applyMigrations, MIGRATIONS, recordTelemetryProject } from "../dist/core/storage/index.js";
 
 const createTemporaryDirectory = (name) => mkdtempSync(join(tmpdir(), `${name}-`));
@@ -47,6 +49,51 @@ const recordSession = (database, id, projectId = "project-1") => {
 };
 
 const fixedTime = (seconds) => `2026-01-02T03:04:${String(seconds).padStart(2, "0")}.000Z`;
+const ENABLED_MEMORY_POLICY = { enabled: true, maxItems: 10_000 };
+
+const storeMemory = (database, projectId, input, policy = ENABLED_MEMORY_POLICY) =>
+  storeMemoryItem(database, projectId, input, policy);
+
+const readWorking = (database, projectId, policy = ENABLED_MEMORY_POLICY) =>
+  readWorkingMemory(database, projectId, policy);
+
+const readForSummarization = (database, projectId, policy = ENABLED_MEMORY_POLICY) =>
+  readMemoryForSummarization(database, projectId, policy);
+
+test("memory policy loads configured state and is required by capture and working reads", () => {
+  const homeDirectory = createTemporaryDirectory("szal-memory-policy");
+  const database = createMemoryDatabase();
+
+  try {
+    writeConfig(
+      {
+        ...DEFAULT_CONFIG,
+        memory: { enabled: false, maxItems: 7 },
+      },
+      { environment: {}, homeDirectory },
+    );
+    assert.deepEqual(loadMemoryPolicy({ environment: {}, homeDirectory }), {
+      enabled: false,
+      maxItems: 7,
+    });
+    assert.throws(
+      () =>
+        storeMemoryItem(database, "project-1", {
+          class: "task",
+          content: "requires policy",
+          id: "requires-policy",
+          representation: "exact",
+          source: { artifactUri: "artifact://policy" },
+          status: "selected",
+        }),
+      /policy is required/,
+    );
+    assert.throws(() => readWorkingMemory(database, "project-1"), /policy is required/);
+  } finally {
+    database.close();
+    rmSync(homeDirectory, { force: true, recursive: true });
+  }
+});
 
 test("project identity uses Git roots, deterministic IDs, fallback paths, and legacy rows", () => {
   const repository = createTemporaryDirectory("szal-memory-git");
@@ -123,7 +170,7 @@ test("exact writes preserve every class, writable status, and provenance form", 
         source,
         status: writableStatuses[index % writableStatuses.length],
       };
-      const stored = storeMemoryItem(
+      const stored = storeMemory(
         database,
         "project-1",
         memoryClass === "decision"
@@ -158,14 +205,14 @@ test("exact writes preserve every class, writable status, and provenance form", 
       source: { sessionId: "session-1" },
       status: "selected",
     };
-    assert.equal(storeMemoryItem(database, "project-1", retryInput).item.id, "item-0");
+    assert.equal(storeMemory(database, "project-1", retryInput).item.id, "item-0");
     assert.throws(
-      () => storeMemoryItem(database, "project-1", { ...retryInput, content: "changed" }),
+      () => storeMemory(database, "project-1", { ...retryInput, content: "changed" }),
       /already used by different content or metadata/,
     );
     assert.throws(
       () =>
-        storeMemoryItem(database, "project-1", {
+        storeMemory(database, "project-1", {
           ...retryInput,
           id: "missing-representation",
           representation: undefined,
@@ -174,7 +221,7 @@ test("exact writes preserve every class, writable status, and provenance form", 
     );
     assert.throws(
       () =>
-        storeMemoryItem(database, "project-1", {
+        storeMemory(database, "project-1", {
           ...retryInput,
           id: "missing-source",
           source: {},
@@ -183,7 +230,7 @@ test("exact writes preserve every class, writable status, and provenance form", 
     );
     assert.throws(
       () =>
-        storeMemoryItem(database, "project-1", {
+        storeMemory(database, "project-1", {
           ...retryInput,
           id: "empty-artifact",
           source: { artifactUri: "" },
@@ -192,7 +239,7 @@ test("exact writes preserve every class, writable status, and provenance form", 
     );
     assert.throws(
       () =>
-        storeMemoryItem(database, "project-1", {
+        storeMemory(database, "project-1", {
           ...retryInput,
           id: "starts-superseded",
           status: "superseded",
@@ -214,7 +261,7 @@ test("memory and decision history survives reopen and supersedes atomically", ()
       rootPath: "/workspace/project-1",
     });
     recordSession(firstDatabase.connection, "session-1");
-    storeMemoryItem(firstDatabase.connection, "project-1", {
+    storeMemory(firstDatabase.connection, "project-1", {
       class: "decision",
       content: "Use exact v1",
       createdAt: fixedTime(1),
@@ -240,9 +287,9 @@ test("memory and decision history survives reopen and supersedes atomically", ()
         status: "selected",
         supersedesId: "decision-1",
       };
-      storeMemoryItem(reopened.connection, "project-1", successorInput);
+      storeMemory(reopened.connection, "project-1", successorInput);
       assert.equal(
-        storeMemoryItem(reopened.connection, "project-1", successorInput).item.id,
+        storeMemory(reopened.connection, "project-1", successorInput).item.id,
         "decision-2",
       );
 
@@ -268,12 +315,12 @@ test("memory and decision history survives reopen and supersedes atomically", ()
         ["decision-2"],
       );
       assert.deepEqual(
-        readWorkingMemory(reopened.connection, "project-1").items.map(({ id }) => id),
+        readWorking(reopened.connection, "project-1").items.map(({ id }) => id),
         ["decision-2"],
       );
       assert.throws(
         () =>
-          storeMemoryItem(reopened.connection, "project-1", {
+          storeMemory(reopened.connection, "project-1", {
             class: "decision",
             content: "Use exact v1",
             createdAt: fixedTime(1),
@@ -287,7 +334,7 @@ test("memory and decision history survives reopen and supersedes atomically", ()
       );
       assert.throws(
         () =>
-          storeMemoryItem(reopened.connection, "project-1", {
+          storeMemory(reopened.connection, "project-1", {
             ...successorInput,
             content: "Competing successor",
             id: "decision-3",
@@ -317,14 +364,21 @@ test("migrated unknown rows are readable but never offered for summarization", (
     database.exec(`
       INSERT INTO projects (id, root_path) VALUES ('project-1', '/workspace/project-1');
       INSERT INTO memory_items (
-        id, project_id, class, status, content, source_uri, created_at, updated_at
-      ) VALUES (
-        'legacy-summary-maybe', 'project-1', 'legacy', 'legacy', 'legacy bytes', NULL,
-        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
-      );
+        id, project_id, class, status, content, source_uri, supersedes_id,
+        created_at, updated_at
+      ) VALUES
+        (
+          'legacy-summary-maybe', 'project-1', 'legacy', 'legacy', 'legacy bytes', NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        ),
+        (
+          'legacy-successor', 'project-1', 'legacy', 'selected', 'later legacy bytes', NULL,
+          'legacy-summary-maybe', '2026-01-01T00:00:01.000Z',
+          '2026-01-01T00:00:01.000Z'
+        );
     `);
     applyMigrations(database);
-    storeMemoryItem(database, "project-1", {
+    storeMemory(database, "project-1", {
       class: "requirement",
       content: "new exact bytes",
       createdAt: fixedTime(1),
@@ -335,17 +389,21 @@ test("migrated unknown rows are readable but never offered for summarization", (
     });
 
     assert.deepEqual(
-      readWorkingMemory(database, "project-1").items.map(({ id, representation }) => ({
+      readWorking(database, "project-1").items.map(({ id, representation }) => ({
         id,
         representation,
       })),
       [
-        { id: "legacy-summary-maybe", representation: "unknown" },
+        { id: "legacy-successor", representation: "unknown" },
         { id: "new-exact", representation: "exact" },
       ],
     );
     assert.deepEqual(
-      readMemoryForSummarization(database, "project-1").items.map(({ id }) => id),
+      readMemoryArchive(database, "project-1").items.map(({ id }) => id),
+      ["legacy-summary-maybe", "legacy-successor", "new-exact"],
+    );
+    assert.deepEqual(
+      readForSummarization(database, "project-1").items.map(({ id }) => id),
       ["new-exact"],
     );
   } finally {
@@ -379,7 +437,7 @@ test("legacy decision keys remain supersedable and leave one current decision", 
     `);
     applyMigrations(database);
 
-    storeMemoryItem(database, "project-1", {
+    storeMemory(database, "project-1", {
       class: "decision",
       content: "structured choice",
       createdAt: fixedTime(1),
@@ -424,6 +482,141 @@ test("legacy decision keys remain supersedable and leave one current decision", 
   }
 });
 
+test("legacy decision memory without a mirror remains supersedable", () => {
+  const database = new BetterSqlite3(":memory:");
+  database.pragma("foreign_keys = ON");
+
+  try {
+    applyMigrations(database, MIGRATIONS.slice(0, 2));
+    database.exec(`
+      INSERT INTO projects (id, root_path)
+      VALUES ('project-1', '/workspace/project-1');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri, created_at, updated_at
+      ) VALUES (
+        'legacy-memory-id', 'project-1', 'decision', 'selected', 'legacy choice',
+        'artifact://legacy', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+      );
+    `);
+    applyMigrations(database);
+
+    storeMemory(database, "project-1", {
+      class: "decision",
+      content: "structured choice",
+      createdAt: fixedTime(1),
+      decision: { reason: "structured reason", rejected: "legacy choice" },
+      id: "structured-memory-id",
+      representation: "exact",
+      source: { artifactUri: "artifact://structured" },
+      status: "selected",
+      supersedesId: "legacy-memory-id",
+    });
+
+    const archive = readMemoryArchive(database, "project-1");
+    assert.deepEqual(
+      archive.items.map(({ id, status }) => ({ id, status })),
+      [
+        { id: "legacy-memory-id", status: "superseded" },
+        { id: "structured-memory-id", status: "selected" },
+      ],
+    );
+    assert.deepEqual(
+      archive.decisions.map(({ id, supersedesId }) => ({ id, supersedesId })),
+      [{ id: "structured-memory-id", supersedesId: null }],
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("legacy cross-project decision links cannot enter structured supersession", () => {
+  const database = new BetterSqlite3(":memory:");
+  database.pragma("foreign_keys = ON");
+
+  try {
+    applyMigrations(database, MIGRATIONS.slice(0, 2));
+    database.exec(`
+      INSERT INTO projects (id, root_path) VALUES
+        ('project-1', '/workspace/project-1'),
+        ('project-2', '/workspace/project-2');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri, created_at, updated_at
+      ) VALUES (
+        'legacy-memory-id', 'project-1', 'decision', 'selected', 'legacy choice',
+        'artifact://legacy', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+      );
+      INSERT INTO decisions (
+        id, project_id, memory_item_id, decision, status, source_uri, decided_at
+      ) VALUES (
+        'cross-project-decision', 'project-2', 'legacy-memory-id', 'legacy choice',
+        'selected', 'artifact://legacy', '2026-01-01T00:00:00.000Z'
+      );
+    `);
+    applyMigrations(database);
+
+    assert.throws(
+      () =>
+        storeMemory(database, "project-1", {
+          class: "decision",
+          content: "structured choice",
+          createdAt: fixedTime(1),
+          decision: { reason: "structured reason" },
+          id: "structured-memory-id",
+          representation: "exact",
+          source: { artifactUri: "artifact://structured" },
+          status: "selected",
+          supersedesId: "legacy-memory-id",
+        }),
+      /Decision predecessor must belong to the same project/,
+    );
+    assert.equal(
+      database
+        .prepare("SELECT status FROM memory_items WHERE id = 'legacy-memory-id'")
+        .pluck()
+        .get(),
+      "selected",
+    );
+    assert.equal(database.prepare("SELECT COUNT(*) FROM memory_items").pluck().get(), 1);
+  } finally {
+    database.close();
+  }
+});
+
+test("working memory omits superseded legacy decision mirrors", () => {
+  const database = new BetterSqlite3(":memory:");
+  database.pragma("foreign_keys = ON");
+
+  try {
+    applyMigrations(database, MIGRATIONS.slice(0, 2));
+    database.exec(`
+      INSERT INTO projects (id, root_path)
+      VALUES ('project-1', '/workspace/project-1');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri, created_at, updated_at
+      ) VALUES (
+        'legacy-memory-id', 'project-1', 'decision', 'selected', 'legacy choice',
+        'artifact://legacy', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+      );
+      INSERT INTO decisions (
+        id, project_id, memory_item_id, decision, status, source_uri, decided_at
+      ) VALUES (
+        'legacy-decision-id', 'project-1', 'legacy-memory-id', 'legacy choice',
+        'superseded', 'artifact://legacy', '2026-01-01T00:00:00.000Z'
+      );
+    `);
+    applyMigrations(database);
+
+    const working = readWorking(database, "project-1");
+    assert.deepEqual(
+      working.items.map(({ id }) => id),
+      ["legacy-memory-id"],
+    );
+    assert.deepEqual(working.decisions, []);
+  } finally {
+    database.close();
+  }
+});
+
 test("working policy caps without deletion and summarization reads exact rows only", () => {
   const database = createMemoryDatabase();
   const enabled = { enabled: true, maxItems: 2 };
@@ -434,7 +627,7 @@ test("working policy caps without deletion and summarization reads exact rows on
       id: "project-2",
       rootPath: "/workspace/project-2",
     });
-    storeMemoryItem(database, "project-2", {
+    storeMemory(database, "project-2", {
       class: "environment",
       content: "other project",
       createdAt: fixedTime(4),
@@ -443,7 +636,7 @@ test("working policy caps without deletion and summarization reads exact rows on
       source: { artifactUri: "artifact://other-project" },
       status: "selected",
     });
-    storeMemoryItem(database, "project-1", {
+    storeMemory(database, "project-1", {
       class: "requirement",
       content: "old exact",
       createdAt: fixedTime(1),
@@ -454,7 +647,7 @@ test("working policy caps without deletion and summarization reads exact rows on
     });
     assert.throws(
       () =>
-        storeMemoryItem(database, "project-1", {
+        storeMemory(database, "project-1", {
           class: "requirement",
           content: "lossy replacement",
           createdAt: fixedTime(2),
@@ -470,7 +663,7 @@ test("working policy caps without deletion and summarization reads exact rows on
       database.prepare("SELECT status FROM memory_items WHERE id = 'old-exact'").pluck().get(),
       "selected",
     );
-    storeMemoryItem(database, "project-1", {
+    storeMemory(database, "project-1", {
       class: "constraint",
       content: "stored summary verbatim ```",
       createdAt: fixedTime(2),
@@ -479,7 +672,7 @@ test("working policy caps without deletion and summarization reads exact rows on
       source: { artifactUri: "artifact://summary" },
       status: "temporary",
     });
-    storeMemoryItem(database, "project-1", {
+    storeMemory(database, "project-1", {
       class: "symbol",
       content: "new exact",
       createdAt: fixedTime(3),
@@ -490,23 +683,23 @@ test("working policy caps without deletion and summarization reads exact rows on
     });
 
     assert.deepEqual(
-      readWorkingMemory(database, "project-1", enabled).items.map(({ id }) => id),
+      readWorking(database, "project-1", enabled).items.map(({ id }) => id),
       ["stored-summary", "new-exact"],
     );
     assert.deepEqual(
-      readWorkingMemory(database, "project-2", enabled).items.map(({ id }) => id),
+      readWorking(database, "project-2", enabled).items.map(({ id }) => id),
       ["other-project-item"],
     );
     assert.deepEqual(
-      readMemoryForSummarization(database, "project-1", enabled).items.map(({ id }) => id),
+      readForSummarization(database, "project-1", enabled).items.map(({ id }) => id),
       ["old-exact", "new-exact"],
     );
-    assert.deepEqual(readWorkingMemory(database, "project-1", disabled).items, []);
-    assert.deepEqual(readMemoryForSummarization(database, "project-1", disabled).items, []);
+    assert.deepEqual(readWorking(database, "project-1", disabled).items, []);
+    assert.deepEqual(readForSummarization(database, "project-1", disabled).items, []);
     assert.equal(database.prepare("SELECT COUNT(*) FROM memory_items").pluck().get(), 4);
     assert.throws(
       () =>
-        storeMemoryItem(
+        storeMemory(
           database,
           "project-1",
           {

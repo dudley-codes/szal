@@ -585,6 +585,46 @@ test("structured-memory migration preserves arbitrary v2 rows as unknown", () =>
   }
 });
 
+test("structured-memory safeguards upgrade the original migration without changing its checksum", () => {
+  const database = new BetterSqlite3(":memory:");
+
+  try {
+    applyMigrations(database, MIGRATIONS.slice(0, 3));
+    database.exec(`
+      INSERT INTO projects (id, root_path) VALUES ('project-1', '/workspace/project-1');
+      INSERT INTO memory_items (
+        id, project_id, class, status, content, source_uri, representation
+      ) VALUES (
+        'memory-1', 'project-1', 'task', 'selected', 'original', 'artifact://original', 'exact'
+      );
+    `);
+
+    assert.doesNotThrow(() => applyMigrations(database));
+    assert.equal(
+      database.prepare("SELECT COUNT(*) FROM schema_migrations").pluck().get(),
+      MIGRATIONS.length,
+    );
+    assert.throws(
+      () =>
+        database.exec(`
+          INSERT OR REPLACE INTO memory_items (
+            id, project_id, class, status, content, source_uri, representation
+          ) VALUES (
+            'memory-1', 'project-1', 'task', 'selected', 'replacement',
+            'artifact://replacement', 'exact'
+          );
+        `),
+      /memory id already exists/,
+    );
+    assert.equal(
+      database.prepare("SELECT content FROM memory_items WHERE id = 'memory-1'").pluck().get(),
+      "original",
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test("structured-memory database invariants protect new rows and decision mirrors", () => {
   const database = new BetterSqlite3(":memory:");
   database.pragma("foreign_keys = ON");
