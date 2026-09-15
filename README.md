@@ -152,6 +152,8 @@ szal doctor --json
 szal memory export
 szal memory export --current --json
 szal install claude
+szal install pi
+szal uninstall pi
 szal -install claude
 szal shell install [bash|zsh] [--terminal-id]
 szal shell uninstall [bash|zsh]
@@ -161,6 +163,19 @@ szal config --json
 szal config get profile
 szal config set profile safe
 ```
+
+## Pi installation
+
+`szal install pi` detects the `pi` executable, resolves the global Pi agent directory from an
+absolute `PI_CODING_AGENT_DIR` or `~/.pi/agent`, and installs Szal's global extension at
+`extensions/szal/index.ts`. The installer owns only files with Szal's ownership marker, is
+idempotent, and refuses to overwrite an existing non-Szal extension.
+
+`szal uninstall pi` removes only that owned global extension file and removes the `szal` extension
+directory when it is empty. Szal telemetry, memory, cold objects, Pi settings, packages, and project
+files are not changed.
+
+Reload or restart Pi after a changed install or uninstall.
 
 ## Claude Code installation
 

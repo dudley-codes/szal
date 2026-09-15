@@ -108,6 +108,14 @@ test("install aliases resolve to the Claude target", () => {
   }
 });
 
+test("uninstall resolves to its command", () => {
+  assert.deepEqual(parseArguments(["uninstall", "pi"]), {
+    arguments_: ["pi"],
+    command: "uninstall",
+    kind: "command",
+  });
+});
+
 test("shell subcommands retain their arguments for the handler", () => {
   assert.deepEqual(parseArguments(["shell", "install", "zsh", "--terminal-id"]), {
     arguments_: ["install", "zsh", "--terminal-id"],
@@ -192,12 +200,74 @@ test("install aliases dispatch one Claude installer and report restart state", a
   assert.equal(calls, 3);
 });
 
-test("install rejects unsupported targets and still reports restart state", async () => {
-  const result = await captureCli(["install", "other"]);
+test("install dispatches the Pi installer and reports reload state", async () => {
+  let calls = 0;
+  const piAdapter = {
+    install: async () => {
+      calls += 1;
+      return {
+        changed: true,
+        details: {
+          backupPaths: [],
+          extension: { changed: true, path: "/tmp/pi/extensions/szal/index.ts" },
+          pi: { configDirectory: "/tmp/pi", executablePath: "/bin/pi", version: "pi 1.2.3" },
+        },
+        requiresRestart: true,
+        status: "succeeded",
+      };
+    },
+  };
 
-  assert.equal(result.exitCode, 1);
-  assert.deepEqual(result.stderr, ["Usage: szal install claude"]);
-  assert.deepEqual(result.stdout, ["Claude Code restart required: no"]);
+  const result = await captureCli(["install", "pi"], { piAdapter });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls, 1);
+  assert.match(result.stdout.join("\n"), /Pi: pi 1\.2\.3 \(\/bin\/pi\)/);
+  assert.match(result.stdout.join("\n"), /Config: \/tmp\/pi/);
+  assert.match(result.stdout.join("\n"), /Extension: installed/);
+  assert.match(result.stdout.join("\n"), /Pi restart\/reload required: yes/);
+  assert.deepEqual(result.stderr, []);
+});
+
+test("uninstall dispatches the Pi uninstaller and reports reload state", async () => {
+  let calls = 0;
+  const piAdapter = {
+    disable: async () => {
+      calls += 1;
+      return {
+        changed: true,
+        details: {
+          backupPaths: [],
+          extension: { changed: true, path: "/tmp/pi/extensions/szal/index.ts" },
+          pi: { configDirectory: "/tmp/pi", executablePath: "/bin/pi", version: "pi 1.2.3" },
+        },
+        requiresRestart: true,
+        status: "succeeded",
+      };
+    },
+  };
+
+  const result = await captureCli(["uninstall", "pi"], { piAdapter });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls, 1);
+  assert.deepEqual(result.stdout, [
+    "Extension: removed (/tmp/pi/extensions/szal/index.ts)",
+    "Pi restart/reload required: yes",
+  ]);
+  assert.deepEqual(result.stderr, []);
+});
+
+test("install and uninstall reject unsupported targets and still report restart state", async () => {
+  const installResult = await captureCli(["install", "other"]);
+  const uninstallResult = await captureCli(["uninstall", "other"]);
+
+  assert.equal(installResult.exitCode, 1);
+  assert.deepEqual(installResult.stderr, ["Usage: szal install claude|pi"]);
+  assert.deepEqual(installResult.stdout, ["Claude Code restart required: no"]);
+  assert.equal(uninstallResult.exitCode, 1);
+  assert.deepEqual(uninstallResult.stderr, ["Usage: szal uninstall pi"]);
+  assert.deepEqual(uninstallResult.stdout, ["Pi restart/reload required: no"]);
 });
 
 test("the executable exposes equivalent help aliases", () => {

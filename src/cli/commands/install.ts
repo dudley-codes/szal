@@ -1,11 +1,60 @@
 import { ConfigError, loadConfig } from "../../core/config/index.js";
 import type { CommandHandler } from "./types.js";
 
-const INSTALL_USAGE = "Usage: szal install claude";
+const INSTALL_USAGE = "Usage: szal install claude|pi";
 
-// Install the user-scoped Claude integration and render every safety-relevant outcome explicitly.
+// Install a supported user-scoped agent integration and render safety-relevant outcomes explicitly.
 export const runInstall: CommandHandler = async (context) => {
-  if (context.arguments_.length !== 1 || context.arguments_[0] !== "claude") {
+  if (context.arguments_.length !== 1) {
+    context.stderr(INSTALL_USAGE);
+    context.stdout("Claude Code restart required: no");
+    return 1;
+  }
+
+  if (context.arguments_[0] === "pi") {
+    const installPi =
+      context.piAdapter?.install ??
+      (await import("../../core/adapters/pi.js")).createPiAdapter().install;
+    const result = await installPi(
+      {
+        environment: context.environment,
+        homeDirectory: context.homeDirectory,
+        projectDirectory: context.projectDirectory,
+      },
+      {},
+    );
+
+    if (result.status !== "succeeded") {
+      context.stderr(
+        `Pi installation ${result.status}: [${result.issue.code}] ${result.issue.message}`,
+      );
+      if (result.issue.remediation !== undefined) {
+        context.stderr(`Remediation: ${result.issue.remediation}`);
+      }
+      if (result.status === "failed") {
+        context.stderr(`Rollback complete: ${result.rolledBack ? "yes" : "no"}`);
+      }
+      context.stdout("Pi restart/reload required: no");
+      return 1;
+    }
+
+    const details = result.details;
+    if (details === undefined) {
+      context.stderr("Pi installation failed: the adapter returned no installation details.");
+      context.stdout("Pi restart/reload required: no");
+      return 1;
+    }
+
+    context.stdout(`Pi: ${details.pi.version} (${details.pi.executablePath})`);
+    context.stdout(`Config: ${details.pi.configDirectory}`);
+    context.stdout(
+      `Extension: ${details.extension.changed ? "installed" : "unchanged"} (${details.extension.path})`,
+    );
+    context.stdout(`Pi restart/reload required: ${result.requiresRestart === true ? "yes" : "no"}`);
+    return 0;
+  }
+
+  if (context.arguments_[0] !== "claude") {
     context.stderr(INSTALL_USAGE);
     context.stdout("Claude Code restart required: no");
     return 1;
