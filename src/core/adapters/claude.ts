@@ -28,6 +28,7 @@ import {
 import type { AgentAdapter, AgentCapabilityName } from "./agent.js";
 import {
   ClaudeSettingsError,
+  claudeHookReferencesManagedPath,
   claudeHookRegistrationEquals,
   listClaudeCommandHooks,
   loadClaudeSettings,
@@ -76,6 +77,9 @@ const SQUEEZ_SCRIPT_PREFIX = Buffer.from(`#!/usr/bin/env bash\n${SQUEEZ_SCRIPT_M
 const SQUEEZ_TOOL_OUTPUT_CATEGORY_SET: ReadonlySet<ContentCategory> = new Set(
   SQUEEZ_TOOL_OUTPUT_CATEGORIES,
 );
+const SZAL_LLMTRIM_DAEMON_CONFIGURATION = "SZAL_LLMTRIM_DAEMON_CONFIGURATION";
+const SZAL_LLMTRIM_ENVIRONMENT_STATE = "SZAL_LLMTRIM_ENVIRONMENT_STATE";
+const LLMTRIM_PROXY_PATTERN = /^http:\/\/127\.0\.0\.1:\d+$/u;
 
 const CLAUDE_NOT_FOUND: AdapterIssue = {
   code: "claude-not-found",
@@ -448,7 +452,8 @@ const unmanagedSqueezHooks = (
     (registration) =>
       (looksLikeSqueezHook(registration.handler.command) ||
         registration.handler.args?.some((argument) => looksLikeSqueezHook(argument)) === true) &&
-      !isKnownRegistration(registration, known),
+      !isKnownRegistration(registration, known) &&
+      !claudeHookReferencesManagedPath(registration, known),
   );
 
 const desiredSqueezFeatures = (
@@ -682,13 +687,33 @@ const validateSettings = (path: string): string | null => {
   }
 };
 
-const settingsEnvironment = (
+const llmtrimCaPath = (
   context: AdapterContext,
-  settings: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, string | undefined>> => ({
-  ...context.environment,
-  ...readClaudeSettingsEnvironment(settings),
-});
+  environment: Readonly<Record<string, string | undefined>>,
+): string =>
+  join(
+    environment.LLMTRIM_HOME ??
+      context.environment.LLMTRIM_HOME ??
+      join(context.homeDirectory, ".llmtrim"),
+    "ca.pem",
+  );
+
+const hasLocalLlmtrimProxy = (environment: Readonly<Record<string, string | undefined>>): boolean =>
+  [environment.HTTPS_PROXY, environment.HTTP_PROXY, environment.https_proxy, environment.http_proxy]
+    .filter((value): value is string => value !== undefined)
+    .some((value) => LLMTRIM_PROXY_PATTERN.test(value));
+
+const hasUnrestorableLlmtrimTransportState = (
+  context: AdapterContext,
+  environment: Readonly<Record<string, string | undefined>>,
+): boolean =>
+  environment[SZAL_LLMTRIM_ENVIRONMENT_STATE] === undefined &&
+  (environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION] !== undefined ||
+    environment.NODE_EXTRA_CA_CERTS === llmtrimCaPath(context, environment) ||
+    (hasLocalLlmtrimProxy(environment) &&
+      (environment.NODE_USE_ENV_PROXY === "1" ||
+        environment.LLMTRIM_PRESET !== undefined ||
+        environment.LLMTRIM_FIRST_ARRIVAL_RECALL !== undefined)));
 
 const issueFromError = (error: unknown): AdapterIssue =>
   failureIssue(
@@ -968,7 +993,19 @@ export const createClaudeAdapter = (options: ClaudeAdapterOptions = {}): ClaudeA
     const knownHooks = managedHooks(configDirectory);
     let originalEnvironment: Readonly<Record<string, string | undefined>>;
     try {
-      originalEnvironment = settingsEnvironment(context, settings.document);
+      const persistedEnvironment = readClaudeSettingsEnvironment(settings.document);
+      originalEnvironment = { ...context.environment, ...persistedEnvironment };
+      if (hasUnrestorableLlmtrimTransportState(context, persistedEnvironment)) {
+        return operationFailure(
+          failureIssue(
+            "claude-llmtrim-environment-state-missing",
+            "Claude settings contain Szal llmtrim transport variables without restorable environment state.",
+            "Restore SZAL_LLMTRIM_ENVIRONMENT_STATE from backup or remove the llmtrim transport variables manually before retrying.",
+          ),
+          false,
+          true,
+        );
+      }
       const overlaps = unmanagedSqueezHooks(settings.document, knownHooks);
       if (overlaps.length > 0) {
         return operationFailure(
