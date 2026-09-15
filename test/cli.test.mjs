@@ -412,6 +412,121 @@ test("config commands persist and retrieve global values with JSON output", () =
   }
 });
 
+test("memory capture-host-lifecycle and recall round-trip current project memory", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-capture-home-"));
+  const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-capture-project-"));
+  const dataHome = join(homeDirectory, "data");
+  const environment = {
+    ...process.env,
+    HOME: homeDirectory,
+    XDG_DATA_HOME: dataHome,
+  };
+  const candidates = [
+    {
+      class: "task",
+      content: "Implement issue 51 vertical slice",
+      key: "task:issue-51",
+      status: "selected",
+    },
+    {
+      class: "constraint",
+      content: "Do not close ticket 51",
+      key: "constraint:no-close",
+      status: "selected",
+    },
+  ];
+
+  try {
+    const before = snapshotDirectory(projectDirectory);
+    const captureArguments = [
+      "memory",
+      "capture-host-lifecycle",
+      "--host",
+      "pi",
+      "--session-id",
+      "pi-session-1",
+      "--kind",
+      "prompt-lifecycle",
+      "--event-id",
+      "prompt-event-1",
+      "--project",
+      ".",
+      "--json",
+    ];
+    const first = runExecutable(
+      captureArguments,
+      projectDirectory,
+      environment,
+      JSON.stringify(candidates),
+    );
+    const second = runExecutable(
+      captureArguments,
+      projectDirectory,
+      environment,
+      JSON.stringify(candidates),
+    );
+    const recall = runExecutable(
+      ["memory", "recall", "--query", "ticket 51", "--json"],
+      projectDirectory,
+      environment,
+    );
+    const bounded = runExecutable(
+      ["memory", "recall", "--limit", "1"],
+      projectDirectory,
+      environment,
+    );
+
+    assert.equal(first.status, 0, first.stderr);
+    assert.deepEqual(JSON.parse(first.stdout), {
+      accepted: 2,
+      projectId: JSON.parse(first.stdout).projectId,
+      rejected: 0,
+      schemaVersion: 1,
+    });
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(recall.status, 0, recall.stderr);
+    const recalled = JSON.parse(recall.stdout);
+    assert.deepEqual(
+      recalled.items.map(({ content, sourceEventKind, sourceHost }) => ({
+        content,
+        sourceEventKind,
+        sourceHost,
+      })),
+      [
+        {
+          content: "Do not close ticket 51",
+          sourceEventKind: "prompt-lifecycle",
+          sourceHost: "pi",
+        },
+      ],
+    );
+    assert.equal(bounded.status, 0, bounded.stderr);
+    assert.match(bounded.stdout, /^## Szal memory\n- \[/);
+    assert.equal((bounded.stdout.match(/^- \[/gmu) ?? []).length, 1);
+
+    const storage = openSzalDatabase({ environment, homeDirectory });
+    try {
+      assert.equal(
+        storage.connection.prepare("SELECT COUNT(*) FROM memory_items").pluck().get(),
+        2,
+      );
+      assert.equal(
+        storage.connection.prepare("SELECT COUNT(*) FROM memory_capture_rejections").pluck().get(),
+        0,
+      );
+    } finally {
+      storage.connection.close();
+    }
+
+    assert.deepEqual(snapshotDirectory(projectDirectory), before);
+    assert.equal(existsSync(join(dataHome, "szal", "szal.db")), true);
+    assert.equal(existsSync(join(projectDirectory, ".szal")), false);
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+    rmSync(projectDirectory, { force: true, recursive: true });
+  }
+});
+
 test("memory export preserves history outside the repository across real CLI processes", () => {
   const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-home-"));
   const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-memory-project-"));

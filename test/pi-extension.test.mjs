@@ -25,6 +25,7 @@ const createPi = ({ appendThrows = false } = {}) => {
   const commands = new Map();
   const handlers = new Map();
   const entries = [];
+  const tools = new Map();
   const pi = {
     appendEntry(customType, data) {
       if (appendThrows) {
@@ -38,16 +39,23 @@ const createPi = ({ appendThrows = false } = {}) => {
     registerCommand(name, command) {
       commands.set(name, command);
     },
+    registerTool(tool) {
+      tools.set(tool.name, tool);
+    },
   };
-  return { commands, entries, handlers, pi };
+  return { commands, entries, handlers, pi, tools };
 };
 
 const withEnabled = async (value, run) => {
   const previous = process.env.SZAL_ENABLED;
+  const previousMemory = process.env.SZAL_PI_MEMORY;
   if (value === undefined) {
     delete process.env.SZAL_ENABLED;
   } else {
     process.env.SZAL_ENABLED = value;
+  }
+  if (previousMemory === undefined) {
+    process.env.SZAL_PI_MEMORY = "0";
   }
   try {
     return await run();
@@ -56,6 +64,25 @@ const withEnabled = async (value, run) => {
       delete process.env.SZAL_ENABLED;
     } else {
       process.env.SZAL_ENABLED = previous;
+    }
+    if (previousMemory === undefined) {
+      delete process.env.SZAL_PI_MEMORY;
+    } else {
+      process.env.SZAL_PI_MEMORY = previousMemory;
+    }
+  }
+};
+
+const withPiMemory = async (value, run) => {
+  const previous = process.env.SZAL_PI_MEMORY;
+  process.env.SZAL_PI_MEMORY = value;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.SZAL_PI_MEMORY;
+    } else {
+      process.env.SZAL_PI_MEMORY = previous;
     }
   }
 };
@@ -104,6 +131,26 @@ const createColdStoreExecutable = ({ exitCode = 0 } = {}) => {
   );
   chmodSync(executablePath, 0o700);
   return { argumentsPath, capturePath, coldObjectId, directory, executablePath };
+};
+
+const createSzalMemoryExecutable = ({
+  recallText = "## Szal memory\n- [task:selected] remembered context",
+} = {}) => {
+  const directory = mkdtempSync(join(tmpdir(), "szal-pi-memory-"));
+  const callsPath = join(directory, "calls.jsonl");
+  const executablePath = join(directory, "szal-memory.js");
+  writeFileSync(
+    executablePath,
+    `#!/usr/bin/env node\nimport { appendFileSync } from "node:fs";\nconst chunks = [];\nfor await (const chunk of process.stdin) chunks.push(chunk);\nconst call = { argv: process.argv.slice(2), cwd: process.cwd(), stdin: Buffer.concat(chunks).toString("utf8") };\nappendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(call) + "\\n");\nif (call.argv[0] === "memory" && call.argv[1] === "recall") { process.stdout.write(${JSON.stringify(recallText)}); }\nelse if (call.argv[0] === "memory" && call.argv[1] === "capture-host-lifecycle") { process.stdout.write(JSON.stringify({ accepted: 1, rejected: 0 })); }\nelse { process.exitCode = 2; }\n`,
+  );
+  chmodSync(executablePath, 0o700);
+  const readCalls = () =>
+    readFileSync(callsPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  return { callsPath, directory, executablePath, readCalls };
 };
 
 const eventFor = (text) => ({
@@ -447,5 +494,83 @@ test("Pi context shaping passes through disabled terminals", async () => {
     assert.equal(measurement.data.rawContextBytes, measurement.data.shapedContextBytes);
   } finally {
     rmSync(loaded.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi before_agent_start injects bounded recalled memory and captures prompt lifecycle", async () => {
+  const loaded = await loadExtension();
+  const memory = createSzalMemoryExecutable({
+    recallText: "## Szal memory\n- [task:selected] Continue the Widget implementation",
+  });
+  try {
+    const { handlers, pi } = createPi();
+    loaded.module.default(pi);
+    const handler = handlers.get("before_agent_start");
+
+    const result = await withSzalCliPath(memory.executablePath, () =>
+      withPiMemory("1", () =>
+        withEnabled("1", () =>
+          handler(
+            { prompt: "finish Widget tests", systemPrompt: "base prompt" },
+            {
+              cwd: memory.directory,
+              sessionManager: {
+                getSessionFile: () => join(memory.directory, "session.jsonl"),
+                getSessionId: () => "pi-session-1",
+              },
+            },
+          ),
+        ),
+      ),
+    );
+
+    assert.match(result.systemPrompt, /base prompt/);
+    assert.match(result.systemPrompt, /Continue the Widget implementation/);
+    const calls = memory.readCalls();
+    assert.deepEqual(calls[0].argv.slice(0, 2), ["memory", "recall"]);
+    assert.deepEqual(calls[1].argv.slice(0, 2), ["memory", "capture-host-lifecycle"]);
+    assert.ok(calls[1].argv.includes("--session-id"));
+    assert.equal(calls[1].argv[calls[1].argv.indexOf("--kind") + 1], "prompt-lifecycle");
+    const candidates = JSON.parse(calls[1].stdin);
+    assert.equal(candidates[0].class, "task");
+    assert.match(candidates[0].content, /finish Widget tests/);
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+    rmSync(memory.directory, { force: true, recursive: true });
+  }
+});
+
+test("Pi szal-recall command and szal_recall tool expose bounded project memory", async () => {
+  const loaded = await loadExtension();
+  const memory = createSzalMemoryExecutable({
+    recallText: "## Szal memory\n- [decision:selected] Use exact cold recall",
+  });
+  try {
+    const { commands, pi, tools } = createPi();
+    loaded.module.default(pi);
+    const notifications = [];
+    const ctx = {
+      cwd: memory.directory,
+      ui: { notify: (message) => notifications.push(message) },
+    };
+
+    await withSzalCliPath(memory.executablePath, () =>
+      commands.get("szal-recall").handler("cold", ctx),
+    );
+    const toolResult = await withSzalCliPath(memory.executablePath, () =>
+      tools
+        .get("szal_recall")
+        .execute("tool-1", { limit: 3, query: "cold" }, undefined, undefined, ctx),
+    );
+
+    assert.match(notifications[0], /Use exact cold recall/);
+    assert.match(toolResult.content[0].text, /Use exact cold recall/);
+    const calls = memory.readCalls();
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every((call) => call.argv.includes("--query")));
+    assert.ok(calls.every((call) => call.argv.includes("cold")));
+  } finally {
+    rmSync(loaded.directory, { force: true, recursive: true });
+    rmSync(memory.directory, { force: true, recursive: true });
   }
 });

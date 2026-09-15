@@ -151,6 +151,7 @@ szal doctor
 szal doctor --json
 szal memory export
 szal memory export --current --json
+szal memory recall --query <text>
 szal recall <szal://cold/sha256/<hash>>
 szal install claude
 szal install pi
@@ -178,7 +179,7 @@ files are not changed.
 
 Reload or restart Pi after a changed install or uninstall.
 
-When `SZAL_ENABLED=1` is active in the Pi process, the installed extension performs a thin fail-open compression slice for large text-only Pi tool results and per-request Pi context. It selects one Szal owner for each eligible category, leaves ambiguous or failed output byte-for-byte unchanged, stores original tool-result bytes in cold storage before lossy replacement, shapes copied Pi context without mutating canonical session history, observes `session_before_compact` preparations without taking over Pi compaction, and records minimal before/after measurements as custom session entries. Compressed tool-result markers include a `szal recall szal://cold/sha256/...` command for exact-ID recall; search/query recall and polished host-native recall UX are still deferred. The `/szal` Pi command reports recent measurements and saved estimated tokens. Unset or `0` `SZAL_ENABLED` keeps Pi in pass-through mode while still recording baseline measurements when possible.
+When `SZAL_ENABLED=1` is active in the Pi process, the installed extension performs a thin fail-open compression and lifecycle-memory slice for large text-only Pi tool results and per-request Pi context. It selects one Szal owner for each eligible category, leaves ambiguous or failed output byte-for-byte unchanged, stores original tool-result bytes in cold storage before lossy replacement, shapes copied Pi context without mutating canonical session history, observes `session_before_compact` preparations without taking over Pi compaction, and records minimal before/after measurements as custom session entries. It also captures deterministic Pi session, prompt, tool-result, and compaction lifecycle facts into external structured memory, injects a small bounded current-memory block before agent starts, and exposes bounded project recall through `/szal-recall`, the `szal_recall` Pi tool, and `szal memory recall`. Compressed tool-result markers include a `szal recall szal://cold/sha256/...` command for exact-ID recall; semantic extraction, predictive recall, and polished branch/resume/reload behavior are still deferred. The `/szal` Pi command reports recent measurements and saved estimated tokens. Unset or `0` `SZAL_ENABLED` keeps Pi in pass-through mode while still recording baseline measurements when possible; set `SZAL_PI_MEMORY=0` to disable Pi lifecycle-memory capture and injection while leaving the compression slice active.
 
 ## Claude Code installation
 
