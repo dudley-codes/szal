@@ -18,6 +18,7 @@ export interface CommandContext extends AdapterContext {
   projectDirectory: string;
   stderr: (message: string) => void;
   stdout: (message: string) => void;
+  stdoutRaw: (bytes: Uint8Array) => void;
   version: string;
 }
 

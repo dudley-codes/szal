@@ -1,5 +1,7 @@
 // Managed by Szal: Pi global extension v1
 
+import { spawn } from "node:child_process";
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const SZAL_MEASUREMENT_ENTRY_TYPE = "szal-compression-measurement";
@@ -13,6 +15,8 @@ const MIN_BYTES = 4_096;
 const MIN_ESTIMATED_TOKENS = 1_024;
 const HEAD_BYTES = 1_800;
 const TAIL_BYTES = 1_800;
+const COLD_OBJECT_ID_PATTERN = /^szal:\/\/cold\/sha256\/[a-f0-9]{64}$/u;
+const COLD_STORE_TIMEOUT_MS = 10_000;
 
 const byteLength = (content: string): number => Buffer.byteLength(content, "utf8");
 const estimateTokens = (content: string): number =>
@@ -61,8 +65,10 @@ const makeMeasurement = (
   reasonCode: string,
   failedOpen: boolean,
   owner: string = SZAL_OWNER,
+  coldObjectId?: string,
 ): Record<string, unknown> => ({
   category,
+  ...(coldObjectId === undefined ? {} : { coldObjectId, recallUri: coldObjectId }),
   compressedBytes: byteLength(compressedContent),
   compressedTokens: estimateTokens(compressedContent),
   failedOpen,
@@ -290,13 +296,81 @@ const sliceByBytes = (content: string, bytes: number, tail = false): string => {
   return tail ? selected.reverse().join("") : selected.join("");
 };
 
-export const compressTextSlice = (content: string): string => {
+export const compressTextSlice = (content: string, coldObjectId?: string): string => {
   const rawBytes = byteLength(content);
   const head = sliceByBytes(content, HEAD_BYTES);
   const tail = sliceByBytes(content, TAIL_BYTES, true);
   const omittedBytes = Math.max(0, rawBytes - byteLength(head) - byteLength(tail));
-  return `${head}\n\n[szal compressed ${omittedBytes} bytes from the middle of this Pi tool result; original content was ${rawBytes} bytes.]\n\n${tail}`;
+  const recallHint =
+    coldObjectId === undefined ? "" : ` Recall exact original with: szal recall ${coldObjectId}.`;
+  return `${head}\n\n[szal compressed ${omittedBytes} bytes from the middle of this Pi tool result; original content was ${rawBytes} bytes.${recallHint}]\n\n${tail}`;
 };
+
+const storeColdOriginal = async (request: {
+  category: string;
+  content: string;
+  sourceTool?: string;
+}): Promise<string | undefined> =>
+  new Promise((resolve) => {
+    const command = process.env.SZAL_CLI_PATH ?? "szal";
+    const arguments_ = ["cold", "store", "--category", request.category];
+    if (request.sourceTool !== undefined && request.sourceTool.length > 0) {
+      arguments_.push("--source-tool", request.sourceTool);
+    }
+
+    let settled = false;
+    let stdout = "";
+    let stderrBytes = 0;
+    const child = spawn(command, arguments_, {
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const finish = (id?: string): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve(id);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish();
+    }, COLD_STORE_TIMEOUT_MS);
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > 256) {
+        child.kill();
+        finish();
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > 4_096) {
+        child.kill();
+        finish();
+      }
+    });
+    child.on("error", () => {
+      finish();
+    });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        finish();
+        return;
+      }
+      const id = stdout.trim();
+      finish(COLD_OBJECT_ID_PATTERN.test(id) ? id : undefined);
+    });
+    child.stdin.on("error", () => {
+      finish();
+    });
+    child.stdin.end(request.content, "utf8");
+  });
 
 const customDataEntries = (
   entries: readonly unknown[],
@@ -542,17 +616,48 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      const compressed = compressTextSlice(content);
+      const coldObjectId = await storeColdOriginal({
+        category,
+        content,
+        sourceTool: event.toolName,
+      });
+      if (coldObjectId === undefined) {
+        appendMeasurement(
+          pi,
+          makeMeasurement(event, category, content, content, "cold-store-error", true),
+        );
+        return;
+      }
+
+      const compressed = compressTextSlice(content, coldObjectId);
       if (compressed.length === 0 || byteLength(compressed) >= byteLength(content)) {
         appendMeasurement(
           pi,
-          makeMeasurement(event, category, content, content, "not-smaller", true),
+          makeMeasurement(
+            event,
+            category,
+            content,
+            content,
+            "not-smaller",
+            true,
+            SZAL_OWNER,
+            coldObjectId,
+          ),
         );
         return;
       }
       appendMeasurement(
         pi,
-        makeMeasurement(event, category, content, compressed, "compressed", false),
+        makeMeasurement(
+          event,
+          category,
+          content,
+          compressed,
+          "compressed",
+          false,
+          SZAL_OWNER,
+          coldObjectId,
+        ),
       );
       return { content: [{ type: "text", text: compressed }] };
     } catch {
