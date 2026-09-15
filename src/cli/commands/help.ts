@@ -14,6 +14,7 @@ Commands:
   config set <path> <value>   Update one configuration value
   doctor                      Report engine and compression ownership health
   memory export               Export external structured memory
+  memory recall               Show bounded current structured memory
   recall <szal://cold/...>    Restore exact cold-storage bytes by ID
   install claude              Install the Claude Code integration safely
   install pi                  Install the global Pi extension
@@ -30,8 +31,9 @@ Shell integration:
   szal shell uninstall [bash|zsh]
   szal shell restore [bash|zsh]
 
-Memory export:
+Memory:
   szal memory export [--project <directory>] [--current] [--json]
+  szal memory recall [--project <directory>] [--query <text>] [--limit <count>] [--json]
 
 Exact recall:
   szal recall <szal://cold/sha256/<hash>>
@@ -42,6 +44,6 @@ Options:
   -off, --off                  Alias for off
   -h, --help                   Show command help
   -v, --version                Show the installed version
-  --json                       Emit JSON for config, doctor, and memory export commands`);
+  --json                       Emit JSON for config, doctor, and memory commands`);
   return 0;
 };

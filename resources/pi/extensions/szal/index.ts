@@ -1,6 +1,7 @@
 // Managed by Szal: Pi global extension v1
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -17,6 +18,11 @@ const HEAD_BYTES = 1_800;
 const TAIL_BYTES = 1_800;
 const COLD_OBJECT_ID_PATTERN = /^szal:\/\/cold\/sha256\/[a-f0-9]{64}$/u;
 const COLD_STORE_TIMEOUT_MS = 10_000;
+const MEMORY_HELPER_TIMEOUT_MS = 10_000;
+const MAX_MEMORY_BLOCK_BYTES = 8_000;
+const MAX_CAPTURE_PREVIEW_BYTES = 600;
+const DEFAULT_MEMORY_LIMIT = 8;
+const MAX_MEMORY_LIMIT = 20;
 
 const byteLength = (content: string): number => Buffer.byteLength(content, "utf8");
 const estimateTokens = (content: string): number =>
@@ -372,6 +378,244 @@ const storeColdOriginal = async (request: {
     child.stdin.end(request.content, "utf8");
   });
 
+const stableJson = (value: unknown): string => {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+    .join(",")}}`;
+};
+
+const stableHash = (value: unknown): string =>
+  createHash("sha256").update(stableJson(value)).digest("hex");
+
+const memoryCaptureEnabled = (): boolean =>
+  process.env.SZAL_ENABLED === "1" && process.env.SZAL_PI_MEMORY !== "0";
+
+const clampMemoryLimit = (limit: unknown): number => {
+  const numeric = Number(limit ?? DEFAULT_MEMORY_LIMIT);
+  return Number.isSafeInteger(numeric) && numeric > 0
+    ? Math.min(numeric, MAX_MEMORY_LIMIT)
+    : DEFAULT_MEMORY_LIMIT;
+};
+
+const previewText = (content: string, maxBytes = MAX_CAPTURE_PREVIEW_BYTES): string => {
+  const singleLine = content.replace(/\s+/gu, " ").trim();
+  if (byteLength(singleLine) <= maxBytes) {
+    return singleLine;
+  }
+  const characters = [...singleLine];
+  let used = 0;
+  const selected: string[] = [];
+  for (const character of characters) {
+    const size = byteLength(character);
+    if (used + size > maxBytes - 3) {
+      break;
+    }
+    selected.push(character);
+    used += size;
+  }
+  return `${selected.join("")}...`;
+};
+
+const contextCwd = (ctx: { cwd?: unknown }): string =>
+  typeof ctx.cwd === "string" && ctx.cwd.length > 0 ? ctx.cwd : process.cwd();
+
+const contextSessionId = (ctx: {
+  sessionManager?: { getSessionFile?: () => unknown; getSessionId?: () => unknown };
+}): string => {
+  const fromManager = ctx.sessionManager?.getSessionId?.();
+  if (typeof fromManager === "string" && fromManager.length > 0) {
+    return fromManager;
+  }
+  if (process.env.PI_SESSION_ID !== undefined && process.env.PI_SESSION_ID.length > 0) {
+    return process.env.PI_SESSION_ID;
+  }
+  const sessionFile = ctx.sessionManager?.getSessionFile?.();
+  return `pi-session-${stableHash({ cwd: contextCwd(ctx), sessionFile }).slice(0, 16)}`;
+};
+
+const contextSessionFile = (ctx: {
+  sessionManager?: { getSessionFile?: () => unknown };
+}): string => {
+  const sessionFile = ctx.sessionManager?.getSessionFile?.();
+  return typeof sessionFile === "string" && sessionFile.length > 0 ? sessionFile : "ephemeral";
+};
+
+const runSzalText = async (request: {
+  arguments: readonly string[];
+  cwd?: string;
+  stdin?: string;
+  timeoutMs?: number;
+}): Promise<string | undefined> =>
+  new Promise((resolve) => {
+    const command = process.env.SZAL_CLI_PATH ?? "szal";
+    let settled = false;
+    let stdout = "";
+    let stderrBytes = 0;
+    const child = spawn(command, [...request.arguments], {
+      cwd: request.cwd,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const finish = (value?: string): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish();
+    }, request.timeoutMs ?? MEMORY_HELPER_TIMEOUT_MS);
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (byteLength(stdout) > MAX_MEMORY_BLOCK_BYTES) {
+        child.kill();
+        finish(stdout.slice(0, MAX_MEMORY_BLOCK_BYTES));
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderrBytes += byteLength(chunk);
+      if (stderrBytes > 4_096) {
+        child.kill();
+        finish();
+      }
+    });
+    child.on("error", () => {
+      finish();
+    });
+    child.on("close", (code) => {
+      finish(code === 0 ? stdout.trim() : undefined);
+    });
+    child.stdin.on("error", () => {
+      finish();
+    });
+    child.stdin.end(request.stdin ?? "", "utf8");
+  });
+
+const capturePiLifecycleMemory = async (
+  ctx: {
+    cwd?: unknown;
+    sessionManager?: { getSessionFile?: () => unknown; getSessionId?: () => unknown };
+  },
+  kind: string,
+  eventId: string,
+  candidates: readonly Record<string, unknown>[],
+): Promise<void> => {
+  if (!memoryCaptureEnabled() || candidates.length === 0) {
+    return;
+  }
+  try {
+    await runSzalText({
+      arguments: [
+        "memory",
+        "capture-host-lifecycle",
+        "--host",
+        "pi",
+        "--session-id",
+        contextSessionId(ctx),
+        "--kind",
+        kind,
+        "--event-id",
+        eventId,
+        "--project",
+        contextCwd(ctx),
+        "--mode",
+        "on",
+        "--json",
+      ],
+      cwd: contextCwd(ctx),
+      stdin: JSON.stringify(candidates),
+    });
+  } catch {
+    // Fail open: lifecycle memory must never affect Pi behavior.
+  }
+};
+
+const loadPiMemoryBlock = async (
+  ctx: { cwd?: unknown },
+  options: { limit?: unknown; query?: string } = {},
+): Promise<string | undefined> => {
+  try {
+    const query = options.query?.trim();
+    return await runSzalText({
+      arguments: [
+        "memory",
+        "recall",
+        "--project",
+        contextCwd(ctx),
+        "--limit",
+        String(clampMemoryLimit(options.limit)),
+        ...(query === undefined || query.length === 0 ? [] : ["--query", query]),
+      ],
+      cwd: contextCwd(ctx),
+    });
+  } catch {
+    return undefined;
+  }
+};
+
+const hasRecallItems = (memoryBlock: string | undefined): memoryBlock is string =>
+  memoryBlock !== undefined && /\n- \[/u.test(memoryBlock);
+
+const toolMemoryClass = (event: { isError?: unknown; toolName?: string }): string => {
+  if (event.isError === true) {
+    return "error";
+  }
+  return /^(read|write|edit|grep|find|ls)$/u.test(event.toolName ?? "")
+    ? "file-state"
+    : "environment";
+};
+
+const captureToolLifecycleMemory = (
+  ctx: {
+    cwd?: unknown;
+    sessionManager?: { getSessionFile?: () => unknown; getSessionId?: () => unknown };
+  },
+  event: { isError?: unknown; toolCallId?: string; toolName?: string },
+  details: {
+    category: string;
+    coldObjectId?: string;
+    compressedContent: string;
+    content: string;
+    reasonCode: string;
+  },
+): void => {
+  const toolCallId =
+    event.toolCallId ?? stableHash({ content: details.content, tool: event.toolName });
+  const compressedBytes = byteLength(details.compressedContent);
+  const rawBytes = byteLength(details.content);
+  void capturePiLifecycleMemory(ctx, "tool-lifecycle", `tool:${toolCallId}:${details.reasonCode}`, [
+    {
+      class: toolMemoryClass(event),
+      confidence: 1,
+      content: [
+        `Pi tool_result ${event.toolName ?? "unknown"}/${toolCallId} ${
+          event.isError === true ? "failed" : "completed"
+        } with ${details.reasonCode}.`,
+        `Category: ${details.category}; raw bytes: ${String(rawBytes)}; compressed bytes: ${String(compressedBytes)}.`,
+        ...(details.coldObjectId === undefined ? [] : [`Cold object: ${details.coldObjectId}.`]),
+        ...(details.content.length === 0 ? [] : [`Preview: ${previewText(details.content)}.`]),
+      ].join(" "),
+      key: `tool:${event.toolName ?? "unknown"}:${toolCallId}:${details.reasonCode}`,
+      status: event.isError === true ? "considered" : "selected",
+    },
+  ]);
+};
+
 const customDataEntries = (
   entries: readonly unknown[],
   customType: string,
@@ -443,6 +687,92 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       ctx.ui.notify(measurementSummary(ctx.sessionManager.getBranch()), "info");
     },
+  });
+
+  pi.registerCommand("szal-recall", {
+    description: "Show bounded Szal structured memory for this project",
+    handler: async (args, ctx) => {
+      const memoryBlock = await loadPiMemoryBlock(ctx, {
+        query: args,
+        limit: DEFAULT_MEMORY_LIMIT,
+      });
+      ctx.ui.notify(memoryBlock ?? "Szal memory is unavailable.", "info");
+    },
+  });
+
+  pi.registerTool({
+    name: "szal_recall",
+    label: "Szal Recall",
+    description: "Recall bounded Szal structured memory for the current project.",
+    promptSnippet: "Recall bounded Szal project memory when recovery context may help",
+    promptGuidelines: [
+      "Use szal_recall only when project memory, recovery context, or previous Pi lifecycle facts are relevant to the user's request.",
+    ],
+    parameters: {
+      additionalProperties: false,
+      properties: {
+        limit: { maximum: MAX_MEMORY_LIMIT, minimum: 1, type: "integer" },
+        query: { type: "string" },
+      },
+      type: "object",
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const input = params as { limit?: unknown; query?: string };
+      const memoryBlock = await loadPiMemoryBlock(ctx, {
+        limit: input.limit,
+        query: input.query,
+      });
+      return {
+        content: [{ type: "text", text: memoryBlock ?? "Szal memory is unavailable." }],
+        details: { limit: clampMemoryLimit(input.limit), query: input.query ?? null },
+      };
+    },
+  });
+
+  pi.on("session_start", async (event, ctx) => {
+    await capturePiLifecycleMemory(
+      ctx,
+      "session-lifecycle",
+      `session:${contextSessionId(ctx)}:${String(event.reason ?? "unknown")}`,
+      [
+        {
+          class: "environment",
+          confidence: 1,
+          content: `Pi session ${contextSessionId(ctx)} started in ${contextCwd(ctx)} (reason: ${String(
+            event.reason ?? "unknown",
+          )}; file: ${contextSessionFile(ctx)}).`,
+          key: `session:${contextSessionId(ctx)}`,
+          status: "selected",
+        },
+      ],
+    );
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!memoryCaptureEnabled()) {
+      return;
+    }
+    const memoryBlock = await loadPiMemoryBlock(ctx, { limit: DEFAULT_MEMORY_LIMIT });
+    const prompt = typeof event.prompt === "string" ? event.prompt : "";
+    await capturePiLifecycleMemory(
+      ctx,
+      "prompt-lifecycle",
+      `prompt:${stableHash({ prompt, sessionId: contextSessionId(ctx) })}`,
+      prompt.trim().length === 0
+        ? []
+        : [
+            {
+              class: "task",
+              confidence: 1,
+              content: `Pi prompt: ${previewText(prompt)}.`,
+              key: `prompt:${stableHash(prompt)}`,
+              status: "selected",
+            },
+          ],
+    );
+    if (hasRecallItems(memoryBlock)) {
+      return { systemPrompt: `${String(event.systemPrompt ?? "")}\n\n${memoryBlock}` };
+    }
   });
 
   pi.on("context", async (event, ctx) => {
@@ -545,7 +875,7 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  pi.on("session_before_compact", async (event) => {
+  pi.on("session_before_compact", async (event, ctx) => {
     if (process.env.SZAL_ENABLED !== "1") {
       return;
     }
@@ -567,13 +897,44 @@ export default function (pi: ExtensionAPI) {
         : 0,
       willRetry: event.willRetry,
     });
+    await capturePiLifecycleMemory(
+      ctx,
+      "compaction-lifecycle",
+      `compaction:${stableHash({
+        firstKeptEntryId: event.preparation?.firstKeptEntryId,
+        reason: event.reason,
+        tokensBefore: event.preparation?.tokensBefore,
+        willRetry: event.willRetry,
+      })}`,
+      [
+        {
+          class: "environment",
+          confidence: 1,
+          content: `Pi compaction ${String(event.reason ?? "unknown")} prepared with ${String(
+            event.preparation?.tokensBefore ?? "unknown",
+          )} tokens before compaction and first kept entry ${String(
+            event.preparation?.firstKeptEntryId ?? "unknown",
+          )}.`,
+          key: `compaction:${String(event.reason ?? "unknown")}:${String(
+            event.preparation?.firstKeptEntryId ?? "unknown",
+          )}`,
+          status: "selected",
+        },
+      ],
+    );
   });
 
-  pi.on("tool_result", async (event) => {
+  pi.on("tool_result", async (event, ctx) => {
     const content = textFromContent(event.content);
     const category = categorizeToolResult(event);
 
     if (content === undefined) {
+      captureToolLifecycleMemory(ctx, event, {
+        category,
+        compressedContent: "",
+        content: "",
+        reasonCode: "non-text-content",
+      });
       appendMeasurement(
         pi,
         makeMeasurement(event, category, "", "", "non-text-content", false, "raw"),
@@ -582,6 +943,12 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (process.env.SZAL_ENABLED !== "1") {
+      captureToolLifecycleMemory(ctx, event, {
+        category,
+        compressedContent: content,
+        content,
+        reasonCode: "terminal-pass-through",
+      });
       appendMeasurement(
         pi,
         makeMeasurement(event, category, content, content, "terminal-pass-through", false, "raw"),
@@ -591,6 +958,12 @@ export default function (pi: ExtensionAPI) {
 
     const owner = resolveOwner(category, [SZAL_OWNER]);
     if (owner.reasonCode === "owner-conflict" || owner.owner === "raw") {
+      captureToolLifecycleMemory(ctx, event, {
+        category,
+        compressedContent: content,
+        content,
+        reasonCode: owner.reasonCode,
+      });
       appendMeasurement(
         pi,
         makeMeasurement(
@@ -608,6 +981,12 @@ export default function (pi: ExtensionAPI) {
 
     const decision = shouldCompress(category, content);
     if (decision.action === "pass-through") {
+      captureToolLifecycleMemory(ctx, event, {
+        category,
+        compressedContent: content,
+        content,
+        reasonCode: decision.reasonCode,
+      });
       appendMeasurement(
         pi,
         makeMeasurement(event, category, content, content, decision.reasonCode, false, "raw"),
@@ -622,6 +1001,12 @@ export default function (pi: ExtensionAPI) {
         sourceTool: event.toolName,
       });
       if (coldObjectId === undefined) {
+        captureToolLifecycleMemory(ctx, event, {
+          category,
+          compressedContent: content,
+          content,
+          reasonCode: "cold-store-error",
+        });
         appendMeasurement(
           pi,
           makeMeasurement(event, category, content, content, "cold-store-error", true),
@@ -631,6 +1016,13 @@ export default function (pi: ExtensionAPI) {
 
       const compressed = compressTextSlice(content, coldObjectId);
       if (compressed.length === 0 || byteLength(compressed) >= byteLength(content)) {
+        captureToolLifecycleMemory(ctx, event, {
+          category,
+          coldObjectId,
+          compressedContent: content,
+          content,
+          reasonCode: "not-smaller",
+        });
         appendMeasurement(
           pi,
           makeMeasurement(
@@ -646,6 +1038,13 @@ export default function (pi: ExtensionAPI) {
         );
         return;
       }
+      captureToolLifecycleMemory(ctx, event, {
+        category,
+        coldObjectId,
+        compressedContent: compressed,
+        content,
+        reasonCode: "compressed",
+      });
       appendMeasurement(
         pi,
         makeMeasurement(
@@ -661,6 +1060,12 @@ export default function (pi: ExtensionAPI) {
       );
       return { content: [{ type: "text", text: compressed }] };
     } catch {
+      captureToolLifecycleMemory(ctx, event, {
+        category,
+        compressedContent: content,
+        content,
+        reasonCode: "compressor-error",
+      });
       appendMeasurement(
         pi,
         makeMeasurement(event, category, content, content, "compressor-error", true),
