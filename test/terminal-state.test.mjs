@@ -11,10 +11,10 @@ import {
   resolveTerminalState,
 } from "../dist/core/terminal/index.js";
 
-const captureCli = (arguments_, options = {}) => {
+const captureCli = async (arguments_, options = {}) => {
   const stdout = [];
   const stderr = [];
-  const exitCode = runCli(
+  const exitCode = await runCli(
     arguments_,
     {
       environment: {},
@@ -37,13 +37,16 @@ const runExecutable = (arguments_, environment) =>
     env: { ...process.env, ...environment },
   });
 
-test("short and long ON/OFF syntaxes share command handlers", () => {
+test("short and long ON/OFF syntaxes share command handlers", async () => {
   for (const alias of ["on", "-on", "--on"]) {
     assert.deepEqual(parseArguments([alias]), {
       command: "on",
       kind: "command",
     });
-    assert.match(captureCli([alias]).stdout.join("\n"), /Requested Szal terminal state: ON/);
+    assert.match(
+      (await captureCli([alias])).stdout.join("\n"),
+      /Requested Szal terminal state: ON/,
+    );
   }
 
   for (const alias of ["off", "-off", "--off"]) {
@@ -51,15 +54,20 @@ test("short and long ON/OFF syntaxes share command handlers", () => {
       command: "off",
       kind: "command",
     });
-    assert.match(captureCli([alias]).stdout.join("\n"), /Requested Szal terminal state: OFF/);
+    assert.match(
+      (await captureCli([alias])).stdout.join("\n"),
+      /Requested Szal terminal state: OFF/,
+    );
   }
 });
 
-test("shell export output is minimal and deterministic", () => {
+test("shell export output is minimal and deterministic", async () => {
   assert.equal(renderTerminalStateExport("on"), "export SZAL_ENABLED=1");
   assert.equal(renderTerminalStateExport("off"), "export SZAL_ENABLED=0");
-  assert.deepEqual(captureCli(["on", "--shell-export"]).stdout, ["export SZAL_ENABLED=1"]);
-  assert.deepEqual(captureCli(["-off", "--shell-export"]).stdout, ["export SZAL_ENABLED=0"]);
+  assert.deepEqual((await captureCli(["on", "--shell-export"])).stdout, ["export SZAL_ENABLED=1"]);
+  assert.deepEqual((await captureCli(["-off", "--shell-export"])).stdout, [
+    "export SZAL_ENABLED=0",
+  ]);
 });
 
 test("two terminal environments retain independent state and identifiers", () => {
@@ -92,10 +100,10 @@ test("two terminal environments retain independent state and identifiers", () =>
   );
 });
 
-test("explicit state overrides support non-interactive usage without changing the environment", () => {
+test("explicit state overrides support non-interactive usage without changing the environment", async () => {
   const environment = { SZAL_ENABLED: "0", SZAL_TERMINAL_ID: "ci-terminal" };
-  const result = captureCli(["status", "--state=on"], { environment });
-  const splitResult = captureCli(["status", "--state", "off"], {
+  const result = await captureCli(["status", "--state=on"], { environment });
+  const splitResult = await captureCli(["status", "--state", "off"], {
     environment: { SZAL_ENABLED: "1" },
   });
 
@@ -106,8 +114,8 @@ test("explicit state overrides support non-interactive usage without changing th
   assert.equal(environment.SZAL_ENABLED, "0");
 });
 
-test("status reports project and active agent and engine capabilities", () => {
-  const result = captureCli(["status"], {
+test("status reports project and active agent and engine capabilities", async () => {
+  const result = await captureCli(["status"], {
     agent: { name: "Claude Code", state: "active" },
     engine: { name: "llmtrim", state: "active" },
     environment: { SZAL_ENABLED: "1", SZAL_TERMINAL_ID: "terminal-1" },
@@ -122,8 +130,8 @@ test("status reports project and active agent and engine capabilities", () => {
   assert.match(output, /Telemetry: ACTIVE/);
 });
 
-test("OFF status is pass-through while telemetry and shared capabilities remain available", () => {
-  const result = captureCli(["status"], {
+test("OFF status is pass-through while telemetry and shared capabilities remain available", async () => {
+  const result = await captureCli(["status"], {
     agent: { name: "Claude Code", state: "active" },
     engine: { name: "llmtrim", state: "active" },
     environment: { SZAL_ENABLED: "0" },
@@ -136,9 +144,9 @@ test("OFF status is pass-through while telemetry and shared capabilities remain 
   assert.match(output, /Telemetry: ACTIVE - baseline measurement remains enabled/);
 });
 
-test("invalid terminal state degrades safely instead of enabling compression", () => {
+test("invalid terminal state degrades safely instead of enabling compression", async () => {
   const state = resolveTerminalState({ SZAL_ENABLED: "maybe" });
-  const result = captureCli(["status"], { environment: { SZAL_ENABLED: "maybe" } });
+  const result = await captureCli(["status"], { environment: { SZAL_ENABLED: "maybe" } });
 
   assert.deepEqual(resolveRuntimePolicy(state), {
     compression: "pass-through",
@@ -167,8 +175,8 @@ test("executable status keeps independently supplied terminal environments isola
   assert.match(disabled.stdout, /Telemetry: ACTIVE/);
 });
 
-test("invalid state override fails with actionable usage", () => {
-  const result = captureCli(["status", "--state=maybe"]);
+test("invalid state override fails with actionable usage", async () => {
+  const result = await captureCli(["status", "--state=maybe"]);
 
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr.join("\n"), /Expected 'on' or 'off'/);

@@ -13,6 +13,13 @@ import {
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 
+import {
+  assertSafeJsonValue as assertSafeSharedJsonValue,
+  cloneJson,
+  isJsonRecord as isRecord,
+  isUnsafeJsonKey,
+} from "../json.js";
+
 import { resolveConfigPaths, type ConfigPaths } from "./paths.js";
 import {
   COMPRESSION_OWNERS,
@@ -37,39 +44,9 @@ export interface ConfigStoreOptions {
   paths?: ConfigPaths;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-
-const cloneJson = <Value>(value: Value): Value => JSON.parse(JSON.stringify(value)) as Value;
-
-// Limit preserved extensions to JSON data and reject keys that can alter object prototypes.
+// Wrap shared JSON safety failures in the configuration domain error consumed by the CLI.
 const assertSafeJsonValue = (value: unknown, path: string): void => {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean" ||
-    (typeof value === "number" && Number.isFinite(value))
-  ) {
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const [index, item] of value.entries()) {
-      assertSafeJsonValue(item, `${path}[${String(index)}]`);
-    }
-    return;
-  }
-  if (isRecord(value)) {
-    for (const [key, item] of Object.entries(value)) {
-      if (UNSAFE_KEYS.has(key)) {
-        throw new ConfigError(`${path}.${key} is not a safe configuration field.`);
-      }
-      assertSafeJsonValue(item, `${path}.${key}`);
-    }
-    return;
-  }
-  throw new ConfigError(`${path} must contain only JSON values.`);
+  assertSafeSharedJsonValue(value, path, (message) => new ConfigError(message));
 };
 
 // Merge object-shaped defaults recursively while retaining forward-compatible unknown fields.
@@ -252,7 +229,7 @@ const splitConfigPath = (path: string): string[] => {
 
 const assertSafePath = (path: string): string[] => {
   const segments = splitConfigPath(path);
-  if (segments.some((segment) => segment.length === 0 || UNSAFE_KEYS.has(segment))) {
+  if (segments.some((segment) => segment.length === 0 || isUnsafeJsonKey(segment))) {
     throw new ConfigError(`Invalid configuration path: ${path}.`);
   }
   return segments;

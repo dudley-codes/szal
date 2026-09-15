@@ -1,4 +1,4 @@
-import { inspectSqueez, squeezEngineState } from "../../core/adapters/index.js";
+import { inspectSqueez, squeezEngineState } from "../../core/adapters/squeez.js";
 import {
   REQUIRED_PRESERVATION_FIELDS,
   resolveCompressionOwnership,

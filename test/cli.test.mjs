@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,12 +28,12 @@ import {
 const ENABLED_MEMORY_POLICY = { enabled: true, maxItems: 10_000 };
 
 // Capture injected command I/O for focused dispatch tests without spawning a process.
-const captureCli = (arguments_) => {
+const captureCli = async (arguments_, options = {}) => {
   const stdout = [];
   const stderr = [];
-  const exitCode = runCli(
+  const exitCode = await runCli(
     arguments_,
-    { version: "9.8.7" },
+    { ...options, version: "9.8.7" },
     {
       stderr: (message) => stderr.push(message),
       stdout: (message) => stdout.push(message),
@@ -97,6 +98,16 @@ test("version aliases resolve to one command", () => {
   }
 });
 
+test("install aliases resolve to the Claude target", () => {
+  for (const alias of ["install", "-install", "--install"]) {
+    assert.deepEqual(parseArguments([alias, "claude"]), {
+      arguments_: ["claude"],
+      command: "install",
+      kind: "command",
+    });
+  }
+});
+
 test("shell subcommands retain their arguments for the handler", () => {
   assert.deepEqual(parseArguments(["shell", "install", "zsh", "--terminal-id"]), {
     arguments_: ["install", "zsh", "--terminal-id"],
@@ -124,8 +135,8 @@ test("memory export retains project and format options for the handler", () => {
   );
 });
 
-test("no arguments show help", () => {
-  const result = captureCli([]);
+test("no arguments show help", async () => {
+  const result = await captureCli([]);
 
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout.join("\n"), /Szal 9\.8\.7/);
@@ -133,20 +144,60 @@ test("no arguments show help", () => {
   assert.deepEqual(result.stderr, []);
 });
 
-test("version reports the injected package version", () => {
-  const result = captureCli(["--version"]);
+test("version reports the injected package version", async () => {
+  const result = await captureCli(["--version"]);
 
   assert.equal(result.exitCode, 0);
   assert.deepEqual(result.stdout, ["9.8.7"]);
   assert.deepEqual(result.stderr, []);
 });
 
-test("unknown commands fail with a help hint", () => {
-  const result = captureCli(["install"]);
+test("unknown commands fail with a help hint", async () => {
+  const result = await captureCli(["frobnicate"]);
 
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr.join("\n"), /Unknown command: install/);
+  assert.match(result.stderr.join("\n"), /Unknown command: frobnicate/);
   assert.match(result.stderr.join("\n"), /szal help/);
+});
+
+test("install aliases dispatch one Claude installer and report restart state", async () => {
+  let calls = 0;
+  const claudeAdapter = {
+    install: async () => {
+      calls += 1;
+      return {
+        changed: true,
+        details: {
+          backupPaths: ["/tmp/settings.backup"],
+          claude: { executablePath: "/bin/claude", version: "2.1.119" },
+          llmtrim: { compression: "enabled", installation: "existing" },
+          ownership: { assignments: [], issues: [], profile: "balanced" },
+          settings: { changed: true, path: "/tmp/settings.json" },
+          squeez: { features: ["bash-wrap"], state: "configured", version: "1.48.9" },
+        },
+        requiresRestart: true,
+        status: "succeeded",
+      };
+    },
+  };
+
+  for (const alias of ["install", "-install", "--install"]) {
+    const result = await captureCli([alias, "claude"], { claudeAdapter });
+    assert.equal(result.exitCode, 0);
+    assert.match(result.stdout.join("\n"), /Claude Code: 2\.1\.119/);
+    assert.match(result.stdout.join("\n"), /Settings: updated/);
+    assert.match(result.stdout.join("\n"), /Claude Code restart required: yes/);
+    assert.deepEqual(result.stderr, []);
+  }
+  assert.equal(calls, 3);
+});
+
+test("install rejects unsupported targets and still reports restart state", async () => {
+  const result = await captureCli(["install", "other"]);
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.stderr, ["Usage: szal install claude"]);
+  assert.deepEqual(result.stdout, ["Claude Code restart required: no"]);
 });
 
 test("the executable exposes equivalent help aliases", () => {
@@ -171,11 +222,11 @@ test("the executable exposes equivalent version aliases", () => {
 });
 
 test("the executable returns a non-zero status for unknown commands", () => {
-  const result = runExecutable(["install"]);
+  const result = runExecutable(["frobnicate"]);
 
   assert.equal(result.status, 1);
   assert.equal(result.stdout, "");
-  assert.match(result.stderr, /Unknown command: install/);
+  assert.match(result.stderr, /Unknown command: frobnicate/);
 });
 
 test("the executable does not modify the current project", () => {
@@ -448,6 +499,143 @@ test("invalid config updates fail without changing the previous file", () => {
   }
 });
 
+test("the compiled -install Claude journey is safe and idempotent", () => {
+  const homeDirectory = mkdtempSync(join(tmpdir(), "szal cli claude home-"));
+  const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-claude-project-"));
+  const binDirectory = join(homeDirectory, "bin");
+  const claudeDirectory = join(homeDirectory, ".claude");
+  const markerPath = join(projectDirectory, "source.txt");
+  mkdirSync(binDirectory, { recursive: true });
+  mkdirSync(claudeDirectory, { recursive: true });
+  writeFileSync(markerPath, "canonical source\n");
+  writeFileSync(
+    join(claudeDirectory, "settings.json"),
+    `${JSON.stringify(
+      {
+        env: { KEEP: "preserved" },
+        hooks: { SessionStart: [{ hooks: [{ command: "/user/hook", type: "command" }] }] },
+        unknown: { retained: true },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(join(binDirectory, "claude"), "#!/bin/sh\nprintf '2.1.139 (Claude Code)\\n'\n");
+  writeFileSync(
+    join(binDirectory, "llmtrim"),
+    `#!/bin/sh
+state="$HOME/.fake-llmtrim-running"
+case "$1" in
+  --version)
+    printf 'llmtrim 0.12.0\\n'
+    ;;
+  status)
+    if [ -f "$state" ]; then
+      printf '{"daemon":{"running":true,"port_accepting":true,"autostart":false,"health":"healthy","pid":4242,"port":7788,"restarts":0,"binary_version":"0.12.0","version":"0.12.0"},"input":{"before":0,"after":0},"requests":0}\\n'
+    else
+      printf '{"daemon":{"running":false,"port_accepting":false,"autostart":false,"health":"stopped","restarts":0,"binary_version":"0.12.0","version":"0.12.0"},"input":{"before":0,"after":0},"requests":0}\\n'
+    fi
+    ;;
+  start)
+    mkdir -p "$HOME/.llmtrim"
+    printf 'test ca\\n' > "$HOME/.llmtrim/ca.pem"
+    : > "$state"
+    ;;
+  stop)
+    rm -f "$state"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`,
+  );
+  writeFileSync(
+    join(binDirectory, "squeez"),
+    `#!/bin/sh
+case "$1" in
+  --version)
+    printf 'squeez 1.48.9\\n'
+    ;;
+  setup)
+    mkdir -p "$SQUEEZ_DIR/hooks"
+    cat > "$SQUEEZ_DIR/hooks/pretooluse.sh" <<'HOOK'
+#!/usr/bin/env bash
+# 'permissionDecision': 'allow', harmless staged fixture
+# d['tool_input']['command'] = squeez + ' wrap ' + shlex.quote(cmd)
+exit 0
+HOOK
+    cat > "$SQUEEZ_DIR/hooks/posttooluse.sh" <<'HOOK'
+#!/usr/bin/env bash
+exit 0
+HOOK
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`,
+  );
+  for (const executablePath of ["claude", "llmtrim", "squeez"].map((name) =>
+    join(binDirectory, name),
+  )) {
+    chmodSync(executablePath, 0o700);
+  }
+  const environment = {
+    HOME: homeDirectory,
+    PATH: `${binDirectory}:/usr/bin:/bin`,
+    XDG_CONFIG_HOME: join(homeDirectory, "config"),
+  };
+  const beforeProjectFiles = readdirSync(projectDirectory);
+
+  try {
+    const first = runExecutable(["-install", "claude"], projectDirectory, environment);
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, /Settings: updated/);
+    assert.match(first.stdout, /llmtrim: existing; transport enabled/);
+    assert.match(first.stdout, /squeez: configured bash-wrap/);
+    assert.match(first.stdout, /Claude Code restart required: yes/);
+    const settingsPath = join(claudeDirectory, "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    assert.deepEqual(settings.unknown, { retained: true });
+    assert.equal(settings.env.KEEP, "preserved");
+    assert.deepEqual(settings.hooks.SessionStart, [
+      { hooks: [{ command: "/user/hook", type: "command" }] },
+    ]);
+    assert.equal(settings.hooks.PreToolUse[0].matcher, "^Bash$");
+    assert.deepEqual(settings.hooks.PreToolUse[0].hooks[0].args, []);
+    const managedScript = settings.hooks.PreToolUse[0].hooks[0].command;
+    assert.doesNotMatch(readFileSync(managedScript, "utf8"), /permissionDecision.*allow/);
+    assert.equal(statSync(managedScript).mode & 0o777, 0o700);
+    const hookResult = spawnSync(managedScript, [], {
+      encoding: "utf8",
+      env: environment,
+      input: "{}\n",
+    });
+    assert.equal(hookResult.status, 0, hookResult.stderr);
+    const firstBackups = readdirSync(claudeDirectory, { recursive: true }).filter((entry) =>
+      String(entry).includes(".szal-backup."),
+    );
+    assert.equal(firstBackups.length, 2);
+
+    const second = runExecutable(["-install", "claude"], projectDirectory, environment);
+    assert.equal(second.status, 0, second.stderr);
+    assert.match(second.stdout, /Settings: unchanged/);
+    assert.match(second.stdout, /Claude Code restart required: no/);
+    const secondBackups = readdirSync(claudeDirectory, { recursive: true }).filter((entry) =>
+      String(entry).includes(".szal-backup."),
+    );
+    assert.deepEqual(secondBackups, firstBackups);
+    assert.deepEqual(readdirSync(projectDirectory), beforeProjectFiles);
+    assert.equal(readFileSync(markerPath, "utf8"), "canonical source\n");
+    assert.equal(readdirSync(claudeDirectory).includes("CLAUDE.md"), false);
+    assert.equal(readdirSync(claudeDirectory).includes("commands"), false);
+  } finally {
+    rmSync(homeDirectory, { force: true, recursive: true });
+    rmSync(projectDirectory, { force: true, recursive: true });
+  }
+});
+
 test("doctor reports active ownership by content category without modifying the project", () => {
   const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-doctor-home-"));
   const projectDirectory = mkdtempSync(join(tmpdir(), "szal-cli-doctor-project-"));
@@ -510,7 +698,7 @@ test("doctor degrades safely when optional squeez is missing", () => {
   }
 });
 
-test("doctor fails closed when two active lossy engines claim one category", () => {
+test("doctor fails closed when two active lossy engines claim one category", async () => {
   const homeDirectory = mkdtempSync(join(tmpdir(), "szal-cli-doctor-conflict-"));
   const stdout = [];
   const stderr = [];
@@ -521,7 +709,7 @@ test("doctor fails closed when two active lossy engines claim one category", () 
   };
 
   try {
-    const exitCode = runCli(
+    const exitCode = await runCli(
       ["doctor", "--json"],
       {
         compressionEngines: [

@@ -1,5 +1,6 @@
-import type { CapabilityState } from "../../core/terminal/index.js";
+import type { AdapterContext, ClaudeAdapter } from "../../core/adapters/index.js";
 import type { CompressionEngineState } from "../../core/compression/index.js";
+import type { CapabilityState } from "../../core/terminal/index.js";
 
 export interface CliComponentStatus {
   detail?: string;
@@ -7,17 +8,16 @@ export interface CliComponentStatus {
   state: CapabilityState;
 }
 
-export interface CommandContext {
+export interface CommandContext extends AdapterContext {
   agent?: CliComponentStatus;
   arguments_: readonly string[];
+  claudeAdapter?: Pick<ClaudeAdapter, "install">;
   compressionEngines?: readonly CompressionEngineState[];
   engine?: CliComponentStatus;
-  environment: Readonly<Record<string, string | undefined>>;
-  homeDirectory: string;
   projectDirectory: string;
   stderr: (message: string) => void;
   stdout: (message: string) => void;
   version: string;
 }
 
-export type CommandHandler = (context: CommandContext) => number;
+export type CommandHandler = (context: CommandContext) => number | Promise<number>;

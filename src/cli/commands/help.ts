@@ -14,6 +14,7 @@ Commands:
   config set <path> <value>   Update one configuration value
   doctor                      Report engine and compression ownership health
   memory export               Export external structured memory
+  install claude              Install the Claude Code integration safely
   on                          Enable compression in this terminal
   off                         Use pass-through compression in this terminal
   shell                       Manage bash/zsh shell integration
@@ -30,10 +31,11 @@ Memory export:
   szal memory export [--project <directory>] [--current] [--json]
 
 Options:
-  -on, --on         Alias for on
-  -off, --off       Alias for off
-  -h, --help        Show command help
-  -v, --version     Show the installed version
-  --json            Emit JSON for config, doctor, and memory export commands`);
+  -install, --install <agent>   Alias for install
+  -on, --on                    Alias for on
+  -off, --off                  Alias for off
+  -h, --help                   Show command help
+  -v, --version                Show the installed version
+  --json                       Emit JSON for config, doctor, and memory export commands`);
   return 0;
 };

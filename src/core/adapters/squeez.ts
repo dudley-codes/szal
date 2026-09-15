@@ -56,13 +56,17 @@ export const SQUEEZ_SUPPORTED_HOSTS = [
   },
 ] as const;
 
-const SQUEEZ_OWNED_CATEGORIES = [
+export const SQUEEZ_TOOL_OUTPUT_CATEGORIES = [
   "code",
-  "bash",
   "tests",
   "json",
   "markdown",
   "memory",
+] as const satisfies readonly ContentCategory[];
+
+const SQUEEZ_OWNED_CATEGORIES = [
+  "bash",
+  ...SQUEEZ_TOOL_OUTPUT_CATEGORIES,
 ] as const satisfies readonly ContentCategory[];
 
 const SQUEEZ_OWNED_CATEGORY_SET: ReadonlySet<ContentCategory> = new Set(SQUEEZ_OWNED_CATEGORIES);

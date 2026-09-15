@@ -3,8 +3,9 @@
 Szal is an agent-agnostic context virtualization layer for terminal-based coding agents.
 
 This repository currently contains the TypeScript CLI, persistent storage, global configuration,
-shell state, telemetry, adapter contracts, compression ownership policy, and an exported llmtrim
-engine adapter. End-to-end agent orchestration remains a later milestone.
+shell state, telemetry, adapter contracts, compression ownership policy, llmtrim and squeez engine
+adapters, and safe Claude Code installation. End-to-end agent orchestration remains a later
+milestone.
 
 ## Requirements
 
@@ -150,6 +151,8 @@ szal doctor
 szal doctor --json
 szal memory export
 szal memory export --current --json
+szal install claude
+szal -install claude
 szal shell install [bash|zsh] [--terminal-id]
 szal shell uninstall [bash|zsh]
 szal shell restore [bash|zsh]
@@ -158,6 +161,34 @@ szal config --json
 szal config get profile
 szal config set profile safe
 ```
+
+## Claude Code installation
+
+`szal install claude`, `szal -install claude`, and `szal --install claude` share one installer. It
+detects Claude Code and its supported hook surface, then updates user settings at
+`$CLAUDE_CONFIG_DIR/settings.json` when that override is absolute or at
+`~/.claude/settings.json` otherwise. Readable user and file-managed hook policy, including
+`disableAllHooks`, is honored. Server-managed, MDM, registry, and policy-helper state cannot be
+resolved by an external CLI, so Szal reports hooks as configured rather than active until they are
+verified inside Claude Code.
+
+The installer retains unrelated settings, environment entries, hooks, and unknown JSON fields. It
+identifies its own hooks by exact structural tuples, creates private timestamped backups, validates
+private same-directory temporary files, preserves settings symlinks, and atomically publishes
+settings last. Any later failure restores committed files and compensates llmtrim changes. A second
+successful run performs no writes and creates no backups.
+
+llmtrim configures the launch environment only when ownership assigns it active categories. Missing
+engines in `auto` mode degrade to another safe owner or raw content; an explicitly enabled missing
+llmtrim is installed through npm, while an explicitly enabled missing or unsafe squeez fails before
+settings change. Szal stages squeez setup in a disposable home and copies only selected tool-hook
+scripts. Anchored matchers exclude Agent/Task and lifecycle hooks, automatic allow decisions are
+removed to preserve Claude's native permissions, and no `CLAUDE.md`, slash command, status line, or
+project file is changed.
+
+Every installer outcome states `Claude Code restart required: yes|no`. Restart when requested so a
+new Claude process inherits the llmtrim transport, then use `/status` and `/hooks` to verify the
+configured hook is active under effective policy.
 
 ## Shell integration
 

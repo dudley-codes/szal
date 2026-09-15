@@ -2,6 +2,12 @@ import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+  REQUIRED_PRESERVATION_FIELDS,
+  type CompressionCapability,
+  type CompressionEngineState,
+} from "../compression/index.js";
+import type { ContentCategory } from "../config/index.js";
 import type { CompressionEngineAdapter } from "./compression-engine.js";
 import {
   availableCapability,
@@ -17,7 +23,7 @@ import {
 } from "./shared.js";
 
 const LLMTRIM_COMMAND = "llmtrim";
-const LLMTRIM_PACKAGE = "@llmtrim/cli@latest";
+export const LLMTRIM_NPM_PACKAGE = "@llmtrim/cli";
 const CLAUDE_API_HOST = "api.anthropic.com";
 const SZAL_LLMTRIM_DAEMON_CONFIGURATION = "SZAL_LLMTRIM_DAEMON_CONFIGURATION";
 const SZAL_LLMTRIM_ENVIRONMENT_STATE = "SZAL_LLMTRIM_ENVIRONMENT_STATE";
@@ -35,6 +41,11 @@ const MANAGED_ENVIRONMENT_KEYS = [
   "LLMTRIM_UPSTREAM_PROXY",
   "LLMTRIM_PRESET",
   "LLMTRIM_FIRST_ARRIVAL_RECALL",
+] as const;
+export const LLMTRIM_PERSISTED_ENVIRONMENT_KEYS = [
+  ...MANAGED_ENVIRONMENT_KEYS,
+  SZAL_LLMTRIM_DAEMON_CONFIGURATION,
+  SZAL_LLMTRIM_ENVIRONMENT_STATE,
 ] as const;
 const LOOPBACK_BYPASS = [
   "localhost",
@@ -87,6 +98,24 @@ export type LlmtrimCapabilityName =
   "pass-through-measurement" | "request-compression" | "request-recovery";
 
 export type LlmtrimPreset = "aggressive" | "auto" | "safe";
+
+const LLMTRIM_OWNED_CATEGORIES = [
+  "conversation",
+  "code",
+  "bash",
+  "tests",
+  "json",
+  "markdown",
+  "memory",
+  "responses",
+] as const satisfies readonly ContentCategory[];
+
+export const LLMTRIM_COMPRESSION_CAPABILITIES: readonly CompressionCapability[] =
+  LLMTRIM_OWNED_CATEGORIES.map((category) => ({
+    category,
+    preserves: REQUIRED_PRESERVATION_FIELDS,
+    safety: "lossy-recoverable",
+  }));
 
 export interface LlmtrimCommandInvocation {
   arguments: readonly string[];
@@ -402,6 +431,15 @@ const supportsRecovery = (version: string): boolean => {
   );
 };
 
+export const llmtrimEngineState = (
+  detection: AdapterDetection<LlmtrimDetectionDetails>,
+): CompressionEngineState => ({
+  available:
+    detection.status === "available" && supportsRecovery(detection.details?.version ?? "0.0.0"),
+  capabilities: LLMTRIM_COMPRESSION_CAPABILITIES,
+  id: "llmtrim",
+});
+
 const definedEnvironment = (
   environment: Readonly<Record<string, string | undefined>>,
 ): Record<string, string> =>
@@ -494,6 +532,35 @@ const parseDaemonConfiguration = (
     ...(document.upstreamProxy === undefined ? {} : { upstreamProxy: document.upstreamProxy }),
     version: 1,
   };
+};
+
+// Select only values owned by llmtrim/Szal before persisting a launch environment.
+export const selectLlmtrimManagedEnvironment = (
+  environment: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<string, string>> => {
+  const selected: Record<string, string> = {};
+  for (const key of LLMTRIM_PERSISTED_ENVIRONMENT_KEYS) {
+    const value = environment[key];
+    if (value !== undefined) {
+      selected[key] = value;
+    }
+  }
+  return selected;
+};
+
+// Recover the prior Szal-managed daemon request for transactional compensation.
+export const readLlmtrimConfigureRequest = (
+  environment: Readonly<Record<string, string | undefined>>,
+): LlmtrimConfigureRequest | undefined => {
+  const configured = parseDaemonConfiguration(environment[SZAL_LLMTRIM_DAEMON_CONFIGURATION]);
+  return configured === undefined
+    ? undefined
+    : {
+        enableRecovery: configured.enableRecovery,
+        host: "claude",
+        mode: "on",
+        preset: configured.preset,
+      };
 };
 
 const mergeNoProxy = (...values: readonly (string | undefined)[]): string => {
@@ -1065,7 +1132,7 @@ export const createLlmtrimAdapter = (options: CreateLlmtrimAdapterOptions = {}):
     const result = await invoke(
       context,
       command,
-      ["install", "--global", LLMTRIM_PACKAGE],
+      ["install", "--global", `${LLMTRIM_NPM_PACKAGE}@latest`],
       context.environment,
       INSTALL_TIMEOUT_MS,
     );
